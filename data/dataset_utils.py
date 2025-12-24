@@ -1,5 +1,5 @@
 import os
-from data.datasets import UAVID, RURALSCAPES
+from data.datasets import UAVID, RURALSCAPES, APOLLOSCAPE
 
 import cv2
 import data.utils.images_transforms as image_transforms
@@ -14,11 +14,33 @@ def parse_datasets(name, path=None, split="train"):
         DATASET = UAVID
     elif name == "ruralscapes":
         DATASET = RURALSCAPES
+    elif name == "apolloscape":
+        DATASET = APOLLOSCAPE
     assert DATASET is not None, f"Dataset {name} not implemented"
 
     if path is None:
         path = DATASET.path
-        
+
+    if name == "apolloscape":
+        data_folder = path
+
+        def list_records(split_name):
+            frame_root = os.path.join(path, split_name, DATASET.frame_folder)
+            if not os.path.isdir(frame_root):
+                raise FileNotFoundError(f"ApolloScape split not found: {frame_root}")
+            records = [d for d in os.listdir(frame_root) if os.path.isdir(os.path.join(frame_root, d))]
+            records.sort()
+            return records
+
+        if split == "test":
+            test_split = "test" if os.path.isdir(os.path.join(path, "test")) else "val"
+            video_train_idx = None
+            video_val_idx = list_records(test_split)
+        else:
+            video_train_idx = list_records("train")
+            video_val_idx = list_records("val")
+        return DATASET, data_folder, video_train_idx, video_val_idx
+
     data_folder = os.path.join(path, "data")
 
     def get_split_indices(split):

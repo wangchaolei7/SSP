@@ -97,4 +97,59 @@ class RURALSCAPES:
         label = label-1
         label[label>=12]=255
         return label
+
+
+class APOLLOSCAPE:
+    name = "ApolloScape"
+    n_classes = 15
+    img_size = (2710, 3384)
+    fps = 30
+    n_frames_vc = 8
+    path = "/home/wangcl/data/open_video_DGSS/ApolloScape"
+    frame_folder = "ColorImage"
+    mask_folder = "15Label"
+    reg_folder = "registration"
+    label_extension = ".png"
+    img_extension = ".jpg"
+    label_suffix = "_bin"
+    classes = {
+        0: "background",
+        1: "class_0",
+        2: "class_1",
+        3: "class_2",
+        4: "class_3",
+        5: "class_4",
+        6: "class_5",
+        7: "class_6",
+        8: "class_7",
+        9: "class_8",
+        10: "class_9",
+        11: "class_10",
+        12: "class_11",
+        13: "class_12",
+        14: "class_13",
+        15: "class_14",
+    }
+    colors = {
+        0: (0, 0, 0),
+        1: (128, 64, 128),
+        2: (244, 35, 232),
+        3: (70, 70, 70),
+        4: (102, 102, 156),
+        5: (190, 153, 153),
+        6: (153, 153, 153),
+        7: (250, 170, 30),
+        8: (220, 220, 0),
+        9: (107, 142, 35),
+        10: (152, 251, 152),
+        11: (70, 130, 180),
+        12: (220, 20, 60),
+        13: (255, 0, 0),
+        14: (0, 0, 142),
+        15: (0, 60, 100),
+    }
+    ignore_index = 255
+    def convert_labels(label):
+        label[label >= APOLLOSCAPE.n_classes] = APOLLOSCAPE.ignore_index
+        return label
     
