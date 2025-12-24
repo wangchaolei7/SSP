@@ -7,6 +7,7 @@ with warnings.catch_warnings():
     from tqdm import tqdm
     import torch
     import torch.nn as nn
+    from torch.utils.data import DataLoader
     import yaml
 
     from vis_utils.visualization import color_predictions, inverse_normalize, pred_to_mask
@@ -15,10 +16,45 @@ with warnings.catch_warnings():
     from models.opt_flow import get_flow_model
     from models.video.models_consistency import get_model as get_video_model
     from data.dataset_prep import prep_infer_image_dataset
+    from utils.distributed import (
+        setup_distributed,
+        cleanup_distributed,
+        is_main_process,
+        get_rank,
+        get_world_size,
+        get_local_rank,
+        barrier,
+        all_reduce_tensor,
+        merge_rank_outputs,
+        DistributedEvalSampler,
+    )
 
+
+def _update_confusion(confusion, pred, label, n_classes, ignore_index):
+    pred = torch.as_tensor(pred).view(-1)
+    label = torch.as_tensor(label).view(-1)
+    if ignore_index is not None:
+        mask = label != ignore_index
+        pred = pred[mask]
+        label = label[mask]
+    if pred.numel() == 0:
+        return confusion
+    idx = label * n_classes + pred
+    confusion += torch.bincount(idx, minlength=n_classes * n_classes).reshape(n_classes, n_classes)
+    return confusion
+
+def _iou_from_confusion(confusion):
+    intersection = torch.diag(confusion).float()
+    union = confusion.sum(0).float() + confusion.sum(1).float() - intersection
+    iou = intersection / (union + 1e-6)
+    return iou, union
 
 def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res):
-    device = torch.device("cuda")
+    distributed = setup_distributed()
+    rank = get_rank()
+    world_size = get_world_size()
+    local_rank = get_local_rank()
+    device = torch.device("cuda", local_rank)
     with open(config, 'r') as cfg_file:
         cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
     data_cfg = cfg["data_cfg"]
@@ -26,23 +62,29 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
     video_model_cfg = cfg["video_model_cfg"]
 
     save_dir = cfg["save_dir"]
+    if is_main_process():
+        visible_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
+        print(f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank} | GPUs={visible_gpus}")
     if os.path.exists(os.path.join(save_dir, checkpoint_folder + checkpoint_name, checkpoint_name.split("@")[-1] + ".pth.tar")):
         if best_model:
             checkpoint = torch.load(os.path.join(save_dir, checkpoint_folder + checkpoint_name, "best_model_3_" + checkpoint_name.split("@")[-1] + ".pth.tar"), map_location="cpu")
-            print("Loaded best checkpoint at epoch {}".format(checkpoint["epoch"]))
+            if is_main_process():
+                print("Loaded best checkpoint at epoch {}".format(checkpoint["epoch"]))
         else:
             checkpoint = torch.load(os.path.join(save_dir, checkpoint_folder + checkpoint_name, checkpoint_name.split("@")[-1] + ".pth.tar"), map_location="cpu")
-            print("Loaded last checkpoint")
+            if is_main_process():
+                print("Loaded last checkpoint")
     else:
         checkpoint = None
 
     vis_dir = os.path.join(cfg["save_dir"], checkpoint_name)
-    save_folder = os.path.join(vis_dir, split)
-    save_folder_colored = os.path.join(vis_dir, split + "_colored")
-    save_folder_blended = os.path.join(vis_dir, split + "_blended")
-    save_folder_labels = os.path.join(vis_dir, split + "_labels")
-    save_folder_labels_blended = os.path.join(vis_dir, split + "_labels_blended")
-    save_folder_gif = os.path.join(vis_dir, split + "_gif")
+    output_root = vis_dir if not distributed else os.path.join(vis_dir, f"rank_{rank}")
+    save_folder = os.path.join(output_root, split)
+    save_folder_colored = os.path.join(output_root, split + "_colored")
+    save_folder_blended = os.path.join(output_root, split + "_blended")
+    save_folder_labels = os.path.join(output_root, split + "_labels")
+    save_folder_labels_blended = os.path.join(output_root, split + "_labels_blended")
+    save_folder_gif = os.path.join(output_root, split + "_gif")
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     if write_res:
@@ -59,6 +101,15 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
 
     # Dataset 
     video_dataset, DATASET = prep_infer_image_dataset(data_cfg, split=split)
+    sampler = DistributedEvalSampler(video_dataset, shuffle=False) if distributed else None
+    video_loader = DataLoader(
+        video_dataset,
+        batch_size=1,
+        sampler=sampler,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=lambda x: x[0],
+    )
 
     # Trained image model
     image_save_dir = image_model_cfg["image_save_dir"]
@@ -82,7 +133,8 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
     # Video model
     model = get_video_model(video_model_cfg, seg_model, flow_model, DATASET.n_classes)
     model.to(device)
-    print(f"Model has {sum([p.numel() for p in model.parameters()]):,} parameters")
+    if is_main_process():
+        print(f"Model has {sum([p.numel() for p in model.parameters()]):,} parameters")
     if checkpoint is not None:
         state_dict = checkpoint["model"]
         model.load_state_dict(state_dict)
@@ -103,11 +155,10 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
         n_frames_vc = DATASET.n_frames_vc
         vc = []
         classes_mIoU = PerClassMetricMeter(DATASET.n_classes)
-        preds_for_iou = []
-        labels_for_iou = []
+        confusion = torch.zeros((DATASET.n_classes, DATASET.n_classes), dtype=torch.int64)
 
     # Predictions + evaluation
-    video_iter = tqdm(video_dataset)
+    video_iter = tqdm(video_loader, disable=not is_main_process())
     for (frames_names, frames, labels_names, labels, v_name, homos) in video_iter:
         frame_list = []
         label_list = []
@@ -138,8 +189,7 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
                 mIoU2.update(classes_mIoU.last_values.sum()/valid_classes.astype(float).sum())
                 wIoU.update(weightedIoU(pred, label, DATASET.n_classes, ignore_index=DATASET.ignore_index))
                 accuracy.update(pixel_accuracy(pred, label))
-                preds_for_iou.append(pred)
-                labels_for_iou.append(label)
+                confusion = _update_confusion(confusion, pred, label, DATASET.n_classes, DATASET.ignore_index)
 
             # Save predictions (normal and colored)
             if write_res:
@@ -201,39 +251,44 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
             #tc_fb.update(temporal_consistency_forwardbackward(frame_list, pred_list, model_raft, DATASET.n_classes, device))
             if len(label_list) > n_frames_vc and len(label_list) == len(pred_list):
                 vc.extend(video_consistency(label_list, pred_list, n_frames_vc))
-            video_iter.set_description(f"{v_name}: TC = {tc.avg:.4f}")
+            if is_main_process():
+                video_iter.set_description(f"{v_name}: TC = {tc.avg:.4f}")
     
     if evaluation:
-        vc = np.array(vc)
-        vc = np.nanmean(vc)
-        per_classes_mIoU = {v: classes_mIoU.avg[k-1] for (k,v) in DATASET.classes.items() if k>0} if DATASET.ignore_index > 0 else {v: classes_mIoU.avg[k].item() for (k,v) in DATASET.classes.items()}
-        preds_for_iou = torch.stack(preds_for_iou, dim=0)
-        labels_for_iou = torch.stack(labels_for_iou, dim=0)
-        global_miou = meanIoU(preds_for_iou, labels_for_iou, DATASET.n_classes, ignore_index=DATASET.ignore_index)
-        global_classes_iou = class_meanIoU(preds_for_iou, labels_for_iou, DATASET.n_classes, ignore_index=DATASET.ignore_index)
-        global_per_classes_mIoU = {v: global_classes_iou[k-1].item() for (k,v) in DATASET.classes.items() if k>0} if DATASET.ignore_index > 0 else {v: global_classes_iou[k].item() for (k,v) in DATASET.classes.items()}
-        print(f"mIoU = {global_miou:.4f} | Temporal Consistency = {tc.avg:.4f}")
-        #print(per_classes_mIoU)
-        print(global_per_classes_mIoU)
-        metrics_name = f"log_metrics_{split}_best_model_3.txt" if best_model else f"log_metrics_{split}.txt"
-        with open(os.path.join(vis_dir, metrics_name), "a") as f:
-            if checkpoint is not None:
-                f.write("Checkpoint {} at epoch {}\n".format(checkpoint_name, checkpoint["epoch"]))
-            #f.write(f"Mean IoU 1 = {mIoU1.avg:.4f}\n")
-            #f.write(f"Mean IoU 2 = {mIoU2.avg:.4f}\n")
-            f.write(f"mIoU = {global_miou:.4f}\n")
-            #f.write(f"Weighted = {wIoU.avg:.4f}\n")
-            f.write(f"Temporal Consistency = {tc.avg:.4f}\n")
-            # f.write(f"Temporal Consistency Proposed = {tc_p.avg:.4f}\n")
-            #f.write(f"Temporal Consistency FB = {tc_fb.avg:.4f}\n")
-            #f.write(f"Video Consistency ({n_frames_vc}) = {vc:.4f}\n")
-            #f.write(f"pixel accuracy = {accuracy.avg:.4f}\n")
-            #f.write(f"Per class mIoU:\n")
-            #for (k, v) in per_classes_mIoU.items():
-            #    f.write(f"  {k}: {v:.5f}\n")
-            f.write(f"per class mIoU:\n")
-            for (k, v) in global_per_classes_mIoU.items():
-                f.write(f"  {k}: {v:.5f}\n")
+        if distributed:
+            confusion = all_reduce_tensor(confusion).cpu()
+
+        iou, union = _iou_from_confusion(confusion)
+        valid = union > 0
+        global_miou = iou[valid].mean().item() if valid.any() else 0.0
+        global_per_classes_mIoU = {v: iou[k-1].item() for (k, v) in DATASET.classes.items() if k > 0} if DATASET.ignore_index > 0 else {v: iou[k].item() for (k, v) in DATASET.classes.items()}
+
+        tc_sum = torch.tensor(tc.sum, device=device)
+        tc_count = torch.tensor(tc.count, device=device)
+        if distributed:
+            tc_sum = all_reduce_tensor(tc_sum)
+            tc_count = all_reduce_tensor(tc_count)
+        tc_avg = (tc_sum / tc_count.clamp(min=1)).item()
+
+        if is_main_process():
+            print(f"mIoU = {global_miou:.4f} | Temporal Consistency = {tc_avg:.4f}")
+            print(global_per_classes_mIoU)
+            metrics_name = f"log_metrics_{split}_best_model_3.txt" if best_model else f"log_metrics_{split}.txt"
+            with open(os.path.join(vis_dir, metrics_name), "a") as f:
+                if checkpoint is not None:
+                    f.write("Checkpoint {} at epoch {}\n".format(checkpoint_name, checkpoint["epoch"]))
+                f.write(f"mIoU = {global_miou:.4f}\n")
+                f.write(f"Temporal Consistency = {tc_avg:.4f}\n")
+                f.write(f"per class mIoU:\n")
+                for (k, v) in global_per_classes_mIoU.items():
+                    f.write(f"  {k}: {v:.5f}\n")
+
+    if distributed:
+        barrier()
+        if is_main_process():
+            rank_dirs = [os.path.join(vis_dir, f"rank_{r}") for r in range(world_size)]
+            merge_rank_outputs(vis_dir, rank_dirs, cleanup=True)
+        barrier()
 
 
 import argparse
@@ -245,6 +300,8 @@ def parse_args():
                          help="Folder where checkpoint (and its config) is located. Should be in config file")
     parser.add_argument("--checkpoint-folder", required=False, type=str, default="", help="Subfolder of checkpoint")
     parser.add_argument("--split", required=False, type=str, default="val", help="Data split to visualize")
+    parser.add_argument("--gpus", required=False, type=str, default=None,
+                        help="Comma-separated GPU ids to use, e.g. \"0,1,3\"")
     parser.add_argument('--evaluation', dest='evaluation', action='store_true', help='Compute metrics (default)')
     parser.add_argument('--no-evaluation', dest='evaluation', action='store_false', help='Don\'t compute metrics')
     parser.add_argument('--best-model', dest='best_model', action='store_true', help='Use best checkpoint')
@@ -258,6 +315,8 @@ def parse_args():
 
 if __name__=='__main__':
     args = parse_args()
+    if args.gpus:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
     save_dir = args.save_dir
     checkpoint_name = args.checkpoint_name
     checkpoint_folder = args.checkpoint_folder
@@ -267,3 +326,4 @@ if __name__=='__main__':
     best_model = args.best_model
     write_res = args.write_res
     main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res)
+    cleanup_distributed()

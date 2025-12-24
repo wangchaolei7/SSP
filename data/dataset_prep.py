@@ -1,4 +1,5 @@
 import numpy as np
+from utils.distributed import is_main_process
 from data.image.image_dataset import ImageDataset, ImageInferenceDataset, ImageLogitsDataset
 from data.video.video_dataset import VideoDataset, VideoLogitsDataset
 from data.apolloscape_dataset import (
@@ -75,7 +76,8 @@ def prep_video_dataset(data_cfg):
             segmentation_transforms=mask_transforms,
         )
 
-    print(f"Train dataset: {len(train_dataset)} samples, Validation dataset: {len(val_dataset)} samples")
+    if is_main_process():
+        print(f"Train dataset: {len(train_dataset)} samples, Validation dataset: {len(val_dataset)} samples")
     return train_dataset, val_dataset, DATASET
 
 
@@ -139,8 +141,9 @@ def prep_image_dataset(data_cfg):
             segmentation_transforms=mask_transforms,
         )
 
-    print(f"Train dataset contains {len(train_dataset)} samples")
-    print(f"Validation dataset contains {len(val_dataset)} samples")
+    if is_main_process():
+        print(f"Train dataset contains {len(train_dataset)} samples")
+        print(f"Validation dataset contains {len(val_dataset)} samples")
 
     return train_dataset, val_dataset, DATASET
 
@@ -173,7 +176,7 @@ def prep_infer_image_dataset(data_cfg, split="val", val_skip_frames=1):
             val_skip_frames=val_skip_frames,
         )
 
-    print(f"Inference dataset contains {len(video_dataset)} videos")
+    if is_main_process():
+        print(f"Inference dataset contains {len(video_dataset)} videos")
 
     return video_dataset, DATASET
-

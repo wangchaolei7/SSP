@@ -14,10 +14,11 @@ def train_one_epoch(
         optimizer,
         criterion,
         scheduler,
-        device
+        device,
+        disable_tqdm=False
 ):
     train_loss = 0
-    train_iter = tqdm(train_loader)
+    train_iter = tqdm(train_loader, disable=disable_tqdm)
     model.train()
     for (images, labels) in train_iter:
         optimizer.zero_grad()
@@ -47,10 +48,11 @@ def train_with_metrics(
         scheduler,
         device,
         n_classes,
-        ignore_index
+        ignore_index,
+        disable_tqdm=False
 ):
     train_loss = 0
-    train_iter = tqdm(train_loader)
+    train_iter = tqdm(train_loader, disable=disable_tqdm)
     model.train()
     preds_for_iou = []
     labels_for_iou = []
@@ -90,10 +92,11 @@ def evaluate(
         val_loader,
         model,
         criterion,
-        device
+        device,
+        disable_tqdm=False
 ):
     val_loss = 0
-    val_iter = tqdm(val_loader)
+    val_iter = tqdm(val_loader, disable=disable_tqdm)
     model.eval()
     for (images, labels) in val_iter:
         images = images.to(device)
@@ -116,10 +119,11 @@ def evaluate_with_metrics(
         criterion,
         device,
         n_classes,
-        ignore_index=255
+        ignore_index=255,
+        disable_tqdm=False
 ):
     val_loss = 0
-    val_iter = tqdm(val_loader)
+    val_iter = tqdm(val_loader, disable=disable_tqdm)
     mIoU1 = MetricMeter()
     mIoU2 = MetricMeter()
     #classes_mIoU = PerClassMetricMeter(n_classes)

@@ -131,6 +131,20 @@ With pre-written configs:
 
 See ```config/image/config_base.yaml``` for an explanation of the image model config file.
 
+### Multi-GPU (single node, DDP)
+
+Use `torchrun` with `CUDA_VISIBLE_DEVICES` (or `--gpus`) to select GPUs.
+
+- Example (3 GPUs):  
+```bash
+CUDA_VISIBLE_DEVICES=0,1,3 torchrun --nproc_per_node=3 -m training.train_image config/image/base_uavid.yaml
+```
+
+- Example (same, using `--gpus`):  
+```bash
+torchrun --nproc_per_node=3 -m training.train_image config/image/base_uavid.yaml --gpus "0,1,3"
+```
+
 ## Train SSP
 
 Training SSP requires an image model checkpoint (trained or not). To obtain an untrained image model:
@@ -144,6 +158,18 @@ To train SSP:
 
 - UAVid: ```python -m training.train_video ssp_uavid.yaml```
 - RuralScapes: ```python -m training.train_video ssp_rural.yaml```
+
+### Multi-GPU (single node, DDP)
+
+- Example (3 GPUs):  
+```bash
+CUDA_VISIBLE_DEVICES=0,1,3 torchrun --nproc_per_node=3 -m training.train_video config/video/ssp_uavid.yaml
+```
+
+- Example (same, using `--gpus`):  
+```bash
+torchrun --nproc_per_node=3 -m training.train_video config/video/ssp_uavid.yaml --gpus "0,1,3"
+```
 
 ## Train teacher model
 
@@ -206,6 +232,18 @@ This will write results to disk.
 
 - Image model: `python -m eval.vis.image CHECKPOINT`
 - SSP or other video model: `python -m eval.vis.video CHECKPOINT`
+
+### Multi-GPU (single node, DDP)
+
+- Image model (2 GPUs):  
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 -m eval.vis.image CHECKPOINT --save-dir /data1/wangcl/project/SSP
+```
+
+- Video model (2 GPUs):  
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 -m eval.vis.video CHECKPOINT --save-dir /data1/wangcl/project/SSP
+```
 
 ## Ablation Study
 

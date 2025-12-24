@@ -48,7 +48,7 @@ data_cfg:
 
 # See video config for details
 training_cfg:
-  batch_size: 4
+  batch_size: 12
   num_epochs: 250
   early_stopping: 200
   num_workers: 4
