@@ -28,6 +28,10 @@ def is_main_process():
     return get_rank() == 0
 
 
+def unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
 def setup_distributed():
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size > 1 and not dist.is_initialized():

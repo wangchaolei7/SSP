@@ -33,6 +33,7 @@ with warnings.catch_warnings():
         all_reduce_tensor,
         seed_everything,
         barrier,
+        unwrap_model,
     )
 
 import argparse
@@ -48,6 +49,20 @@ def _resolve_config_path(config, base_dir):
     if os.path.isfile(config):
         return config
     return os.path.join(base_dir, config)
+
+def normalize_state_dict_keys(state_dict, model):
+    if not state_dict:
+        return state_dict
+    model_state = unwrap_model(model).state_dict()
+    if not model_state:
+        return state_dict
+    state_has_module = any(k.startswith("module.") for k in state_dict.keys())
+    model_has_module = any(k.startswith("module.") for k in model_state.keys())
+    if state_has_module and not model_has_module:
+        return {k[len("module."):] if k.startswith("module.") else k: v for k, v in state_dict.items()}
+    if not state_has_module and model_has_module:
+        return {f"module.{k}" if not k.startswith("module.") else k: v for k, v in state_dict.items()}
+    return state_dict
 
 
 def main(config):
@@ -158,7 +173,8 @@ def main(config):
             state_dict = pretrained_checkpoint["model"]
         except:
             state_dict = torch.load(cfg["pretrained_checkpoint"])
-        model.load_state_dict(state_dict, strict=False)
+        state_dict = normalize_state_dict_keys(state_dict, model)
+        unwrap_model(model).load_state_dict(state_dict, strict=False)
 
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -166,6 +182,7 @@ def main(config):
             device_ids=[local_rank],
             output_device=local_rank,
         )
+    core_model = unwrap_model(model)
 
     # Optim
     iter_per_epoch = len(train_loader)
@@ -192,10 +209,8 @@ def main(config):
 
     if resume_training:
         start_epoch = resume_checkpoint["epoch"]
-        if distributed:
-            model.module.load_state_dict(resume_checkpoint["model"])
-        else:
-            model.load_state_dict(resume_checkpoint["model"])
+        resume_state = normalize_state_dict_keys(resume_checkpoint["model"], model)
+        core_model.load_state_dict(resume_state)
         optimizer.load_state_dict(resume_checkpoint["optimizer"])
         scheduler.load_state_dict(resume_checkpoint["scheduler"])
 
@@ -213,7 +228,7 @@ def main(config):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         if data_cfg.get("logit_distillation", False):
-            train_loss, const_loss = model.kd_train_one_epoch(
+            train_loss, const_loss = core_model.kd_train_one_epoch(
             train_loader, 
             optimizer, 
             criterion, 
@@ -221,7 +236,7 @@ def main(config):
             device,
             )
         else:
-            train_loss, const_loss = model.train_one_epoch(
+            train_loss, const_loss = core_model.train_one_epoch(
                 train_loader, 
                 optimizer, 
                 criterion, 
@@ -233,7 +248,7 @@ def main(config):
         train_losses.append(train_loss)
         train_const_losses.append(const_loss)
 
-        results = model.evaluate_with_metrics(
+        results = core_model.evaluate_with_metrics(
             val_loader, 
             criterion, 
             device,
@@ -260,7 +275,7 @@ def main(config):
         save_name = None
         if is_main_process():
             save_dict = {
-                "model": model.state_dict() if not distributed else model.module.state_dict(),
+                "model": core_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "epoch": epoch+1,
