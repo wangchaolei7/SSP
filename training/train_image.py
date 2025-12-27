@@ -15,12 +15,8 @@ with warnings.catch_warnings():
     from models.image.models import get_model
     from training.utils.utils_image import train_one_epoch, train_with_metrics, evaluate, evaluate_with_metrics, save_model
     from utils.distributed import (
-        setup_distributed,
         cleanup_distributed,
         is_main_process,
-        get_rank,
-        get_world_size,
-        get_local_rank,
         all_reduce_scalar,
         all_reduce_tensor,
         seed_everything,
@@ -28,6 +24,24 @@ with warnings.catch_warnings():
     )
 
 import argparse
+def init_distributed_and_device():
+    import os
+    import torch
+    import torch.distributed as dist
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    distributed = dist.is_available() and world_size > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+
+    if distributed and not dist.is_initialized():
+        dist.init_process_group(backend="nccl", init_method="env://")
+
+    return distributed, rank, local_rank, world_size, device
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Training Parameters")
@@ -43,10 +57,7 @@ def _resolve_config_path(config, base_dir):
 
 
 def main(config):
-    distributed = setup_distributed()
-    rank = get_rank()
-    world_size = get_world_size()
-    local_rank = get_local_rank()
+    distributed, rank, local_rank, world_size, device = init_distributed_and_device()
     date = datetime.datetime.now()
     # Config file
     config_path = _resolve_config_path(config, "config/image")
@@ -71,7 +82,7 @@ def main(config):
 
     if is_main_process():
         visible_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
-        print(f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank} | GPUs={visible_gpus}")
+        print(f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank} | cuda_device={torch.cuda.current_device()} | GPUs={visible_gpus}")
 
     base_seed = cfg.get("seed", 1337)
     seed_everything(base_seed + rank)
@@ -112,7 +123,6 @@ def main(config):
     )
 
     # Model
-    device = torch.device("cuda", local_rank)
     model = get_model(
         model_cfg,
         DATASET.n_classes,
@@ -131,6 +141,7 @@ def main(config):
             model,
             device_ids=[local_rank],
             output_device=local_rank,
+            broadcast_buffers=False,
         )
 
     # Optim

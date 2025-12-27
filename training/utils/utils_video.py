@@ -7,7 +7,7 @@ import datetime
 import numpy as np
 
 
-def save_model(save_dict, cfg, save_dir, date, per_classes_mIoU=None):
+def save_model(save_dict, cfg, save_dir, date, per_classes_mIoU=None, checkpoint_name=None, save_checkpoint=True):
     date_str = date.strftime("%d-%m_%H-%M")
     ep = save_dict["epoch"]
     train_loss = save_dict["train_losses"][-1]
@@ -16,8 +16,11 @@ def save_model(save_dict, cfg, save_dir, date, per_classes_mIoU=None):
     val_const_loss = save_dict["val_const_losses"][-1]
     val_global_miou = save_dict["val_global_miou"][-1]
     save_name = f"{date_str}"
-    if not os.path.exists(os.path.join(save_dir, save_name)):
-        os.mkdir(os.path.join(save_dir, save_name))
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    run_dir = os.path.join(save_dir, save_name)
+    if not os.path.exists(run_dir):
+        os.mkdir(run_dir)
     with open(os.path.join(save_dir, save_name, save_name + "_config.yaml"), "w") as file:
         yaml.dump(cfg, file, default_flow_style=False, sort_keys=False)
 
@@ -32,5 +35,8 @@ def save_model(save_dict, cfg, save_dir, date, per_classes_mIoU=None):
         if per_classes_mIoU is not None:
             f.write(f"Per class mIoU: {per_classes_mIoU}\n")
 
-    torch.save(save_dict, os.path.join(save_dir, save_name, save_name + ".pth.tar"))
+    if save_checkpoint:
+        if checkpoint_name is None:
+            checkpoint_name = save_name + ".pth.tar"
+        torch.save(save_dict, os.path.join(save_dir, save_name, checkpoint_name))
     return save_name

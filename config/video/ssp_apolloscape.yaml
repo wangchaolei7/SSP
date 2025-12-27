@@ -1,5 +1,5 @@
 # Folder where the checkpoint and results will be saved
-save_dir: /data1/wangcl/project/SSP
+save_dir: /data1/wangcl/project/SSP/video
 # Weights (of the same architecture) to load before training, leave null if no pre-training. Checkpoint should be in save_dir
 pretrained_checkpoint: null
 # Resume the training of a checkpoint in save_dir. The rest of this config will be discarded.
@@ -86,6 +86,10 @@ video_model_cfg:
   upsampling: bicubic
   # Registration model for the homography computation on gpu. From the Kornia library.
   k_registrator_model: disk
+  # Homography determinant epsilon for invertibility check
+  homo_det_eps: 1.0e-8
+  # Fallback behavior for invalid homographies: "identity" or "skip"
+  homo_fallback: "identity"
 
 ########################################################################################################################################
 training_cfg:
@@ -96,12 +100,16 @@ training_cfg:
   # Batch size
   batch_size: 8
   # num_workers in dataloader
-  num_workers: 4
+  num_workers: 8
   # Learning rate
   lr: 5.0e-05
   # Train a layer with a different learning rate than the rest of the model, never used.
   trained_layer: null
   secondary_lr: 0.0001
+  # Save checkpoints every N epochs
+  save_every: 20
+  # Always save latest checkpoint
+  save_last: true
 
 ########################################################################################################################################
 optim_cfg:

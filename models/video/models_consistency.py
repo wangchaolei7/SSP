@@ -9,6 +9,7 @@ import kornia.feature as KF
 from utils.losses import TempConstLoss
 from utils.torch_utils import conditional_no_grad
 from utils.metrics import meanIoU, class_meanIoU, MetricMeter, PerClassMetricMeter
+from utils.distributed import is_main_process
 from data.utils.images_transforms import soft_to_hard_labels
 from models.opt_flow import flowwarp, interpolate_flow
 from models.video.mixing_layers import (
@@ -153,24 +154,116 @@ class IdentityRegistrator(nn.Module):
         return homos
 
 
-def warp_batch(homos, last_out, scale=None, interp_mode="bilinear"):
+def _normalize_homo(homo, device, dtype):
+    if not torch.is_tensor(homo):
+        homo = torch.as_tensor(homo, device=device, dtype=dtype)
+    else:
+        homo = homo.to(device=device, dtype=dtype)
+    while homo.dim() > 2 and homo.shape[0] == 1:
+        homo = homo.squeeze(0)
+    if homo.dim() != 2 or homo.shape[-2:] != (3, 3):
+        if homo.numel() == 9:
+            homo = homo.reshape(3, 3)
+            return homo, True
+        return None, False
+    return homo, True
+
+def warp_batch(homos, last_out, scale=None, interp_mode="bilinear", det_eps=1e-8, fallback="identity", log_state=None, log_every=200):
+    if homos is None:
+        return last_out
+    batch_size = last_out.shape[0]
+    device = last_out.device
+    dtype = last_out.dtype
+    fallback = (fallback or "identity").lower()
+    if torch.is_tensor(homos):
+        dtype = homos.dtype
+    elif isinstance(homos, (list, tuple)) and len(homos) > 0 and torch.is_tensor(homos[0]):
+        dtype = homos[0].dtype
+
+    if isinstance(homos, (list, tuple)):
+        homo_list = list(homos)
+        if len(homo_list) == 0:
+            homo_list = [torch.eye(3, device=device, dtype=dtype) for _ in range(batch_size)]
+        if len(homo_list) == 1 and batch_size > 1:
+            homo_list = homo_list * batch_size
+        if len(homo_list) < batch_size:
+            homo_list = homo_list + [homo_list[-1]] * (batch_size - len(homo_list))
+        homo_list = homo_list[:batch_size]
+    elif torch.is_tensor(homos):
+        if homos.dim() == 2:
+            homo_list = [homos] * batch_size
+        else:
+            if homos.shape[0] == 1 and batch_size > 1:
+                homo_list = [homos[0]] * batch_size
+            else:
+                homo_list = [homos[k] for k in range(batch_size)]
+    else:
+        homo_list = [torch.eye(3, device=device, dtype=dtype) for _ in range(batch_size)]
+
+    if log_state is not None:
+        log_state.setdefault("step", 0)
+        log_state["step"] += 1
+        log_state.setdefault("invalid", 0)
+        log_state.setdefault("total", 0)
+        log_state.setdefault("min_det", None)
+        log_state.setdefault("max_det", None)
+
     warped_list = []
-    for k in range(len(last_out)):
-        homo = homos[k]
+    identity = torch.eye(3, device=device, dtype=dtype)
+    down = None
+    up = None
+    if scale is not None:
+        down = torch.tensor([[[scale, 0, 0], [0, scale, 0], [0, 0, 1]]], device=device, dtype=dtype)
+        up = torch.tensor([[[1 / scale, 0, 0], [0, 1 / scale, 0], [0, 0, 1]]], device=device, dtype=dtype)
+
+    for k in range(batch_size):
+        homo, shape_ok = _normalize_homo(homo_list[k], device, dtype)
+        valid = False
+        det_val = None
+        if shape_ok and homo is not None:
+            finite = torch.isfinite(homo).all().item()
+            det = torch.linalg.det(homo.float())
+            det_finite = torch.isfinite(det).item()
+            if det_finite:
+                det_val = det.item()
+            valid = finite and det_finite and (abs(det_val) > det_eps if det_val is not None else False)
+
+        if log_state is not None:
+            log_state["total"] += 1
+            if not valid:
+                log_state["invalid"] += 1
+            if det_val is not None:
+                if log_state["min_det"] is None or det_val < log_state["min_det"]:
+                    log_state["min_det"] = det_val
+                if log_state["max_det"] is None or det_val > log_state["max_det"]:
+                    log_state["max_det"] = det_val
+
+        if not valid:
+            if fallback == "skip":
+                warped_list.append(last_out[k].unsqueeze(0))
+                continue
+            homo = identity
+
+        if homo.dim() == 2:
+            homo = homo.unsqueeze(0)
         if scale is not None:
-            down = torch.tensor([[[scale,0,0], [0,scale,0], [0,0,1]]], device=homo.device)
-            up = torch.tensor([[[1/scale,0,0], [0,1/scale,0], [0,0,1]]], device=homo.device)
             homo = down @ homo @ up
         warped_list.append(KG.warp_perspective(last_out[k].unsqueeze(0), homo, last_out[k].shape[-2:], mode=interp_mode))
     last_out_warped = torch.cat(warped_list, dim=0) 
+    if log_state is not None and log_every and log_state["step"] % log_every == 0:
+        if is_main_process():
+            det_min = log_state["min_det"]
+            det_max = log_state["max_det"]
+            det_range = "n/a" if det_min is None else f"[{det_min:.3e}, {det_max:.3e}]"
+            print(f"[warp_batch] invalid homos: {log_state['invalid']}/{log_state['total']} | det range: {det_range} | eps={det_eps} fallback={fallback}")
+        log_state["invalid"] = 0
+        log_state["total"] = 0
+        log_state["min_det"] = None
+        log_state["max_det"] = None
     return last_out_warped
 
-def warp(homo, last_out, scale=None, interp_mode="bilinear"):
-    if scale is not None:
-        down = torch.tensor([[[scale,0,0], [0,scale,0], [0,0,1]]], device=homo.device)
-        up = torch.tensor([[[1/scale,0,0], [0,1/scale,0], [0,0,1]]], device=homo.device)
-        homo = down @ homo @ up
-    last_out_warped = KG.warp_perspective(last_out, homo, last_out.shape[-2:], mode=interp_mode)
+def warp(homo, last_out, scale=None, interp_mode="bilinear", det_eps=1e-8, fallback="identity"):
+    last_out_warped = warp_batch(homo, last_out, scale=scale, interp_mode=interp_mode, det_eps=det_eps, fallback=fallback)
     return last_out_warped
 
 
@@ -199,6 +292,10 @@ class ConsistencyWrapper(nn.Module):
 
         self.upsample_before_mixing = model_cfg.get("upsample_before_mixing", True)
         self.low_scale_homo = model_cfg.get("low_scale_homo", False)
+        self.homo_det_eps = model_cfg.get("homo_det_eps", 1e-8)
+        self.homo_fallback = model_cfg.get("homo_fallback", "identity")
+        self.homo_log_every = model_cfg.get("homo_log_every", 200)
+        self._homo_log_state = {"step": 0, "invalid": 0, "total": 0, "min_det": None, "max_det": None}
 
         self.features_interp_mode = model_cfg.get("features_interp_mode", "bilinear")
         self.k_registrator_model = model_cfg.get("k_registrator_model", None)
@@ -232,8 +329,23 @@ class ConsistencyWrapper(nn.Module):
                 out = nn.functional.interpolate(out, size=frames.shape[-2:], mode=self.upsampling, align_corners=False)
                 last_out = nn.functional.interpolate(last_out, size=frames.shape[-2:], mode=self.upsampling, align_corners=False)
 
-            last_out_warped = warp_batch(homos, last_out, scale=None if (self.upsample_before_mixing or self.low_scale_homo) else 1/4)
-            last_featmap_warped = warp_batch(homos, last_featmap, scale=None if self.low_scale_homo else 1/4, interp_mode=self.features_interp_mode)
+            last_out_warped = warp_batch(
+                homos,
+                last_out,
+                scale=None if (self.upsample_before_mixing or self.low_scale_homo) else 1/4,
+                det_eps=self.homo_det_eps,
+                fallback=self.homo_fallback,
+                log_state=self._homo_log_state,
+                log_every=self.homo_log_every,
+            )
+            last_featmap_warped = warp_batch(
+                homos,
+                last_featmap,
+                scale=None if self.low_scale_homo else 1/4,
+                interp_mode=self.features_interp_mode,
+                det_eps=self.homo_det_eps,
+                fallback=self.homo_fallback,
+            )
 
             # Mixing
             last_out_warped, out = self.pred_mixing(last_out_warped, out)
@@ -449,8 +561,21 @@ class ConsistencyWrapper(nn.Module):
                     out = nn.functional.interpolate(out, size=frame.shape[-2:], mode=self.upsampling, align_corners=False)
                     last_out = nn.functional.interpolate(last_out, size=frame.shape[-2:], mode=self.upsampling, align_corners=False)
 
-                last_out_warped = warp(homo, last_out, scale=None if (self.upsample_before_mixing or self.low_scale_homo) else 1/4)
-                last_featmap_warped = warp(homo, last_featmap, scale=None if self.low_scale_homo else 1/4, interp_mode=self.features_interp_mode)
+                last_out_warped = warp(
+                    homo,
+                    last_out,
+                    scale=None if (self.upsample_before_mixing or self.low_scale_homo) else 1/4,
+                    det_eps=self.homo_det_eps,
+                    fallback=self.homo_fallback,
+                )
+                last_featmap_warped = warp(
+                    homo,
+                    last_featmap,
+                    scale=None if self.low_scale_homo else 1/4,
+                    interp_mode=self.features_interp_mode,
+                    det_eps=self.homo_det_eps,
+                    fallback=self.homo_fallback,
+                )
 
                 last_out_warped, out = self.pred_mixing(last_out_warped, out)
                 sim = self.sim(last_featmap_warped, featmap, size=out.shape[-2:])
@@ -505,8 +630,24 @@ class ConsistencyFeatureWrapper(ConsistencyWrapper):
             decoderfeats = self.base_model.decoder_lastfeat(feats)
             last_featmap, featmap = last_feats[0], feats[0]
 
-            last_decoderfeats_warped = warp_batch(homos, last_decoderfeats, scale=None if self.low_scale_homo else 1/4, interp_mode=self.features_interp_mode)
-            last_featmap_warped = warp_batch(homos, last_featmap, scale=None if self.low_scale_homo else 1/4, interp_mode=self.features_interp_mode)
+            last_decoderfeats_warped = warp_batch(
+                homos,
+                last_decoderfeats,
+                scale=None if self.low_scale_homo else 1/4,
+                interp_mode=self.features_interp_mode,
+                det_eps=self.homo_det_eps,
+                fallback=self.homo_fallback,
+                log_state=self._homo_log_state,
+                log_every=self.homo_log_every,
+            )
+            last_featmap_warped = warp_batch(
+                homos,
+                last_featmap,
+                scale=None if self.low_scale_homo else 1/4,
+                interp_mode=self.features_interp_mode,
+                det_eps=self.homo_det_eps,
+                fallback=self.homo_fallback,
+            )
 
             # Mixing
             last_decoderfeats_warped, decoderfeats = self.pred_mixing(last_decoderfeats_warped, decoderfeats)
@@ -539,8 +680,22 @@ class ConsistencyFeatureWrapper(ConsistencyWrapper):
                 homo = self.registrator(last_frame, frame)
             
             with torch.no_grad():
-                last_decoderfeats_warped = warp(homo, last_decoderfeats, scale=None if self.low_scale_homo else 1/4, interp_mode=self.features_interp_mode)
-                last_featmap_warped = warp(homo, last_featmap, scale=None if self.low_scale_homo else 1/4, interp_mode=self.features_interp_mode)
+                last_decoderfeats_warped = warp(
+                    homo,
+                    last_decoderfeats,
+                    scale=None if self.low_scale_homo else 1/4,
+                    interp_mode=self.features_interp_mode,
+                    det_eps=self.homo_det_eps,
+                    fallback=self.homo_fallback,
+                )
+                last_featmap_warped = warp(
+                    homo,
+                    last_featmap,
+                    scale=None if self.low_scale_homo else 1/4,
+                    interp_mode=self.features_interp_mode,
+                    det_eps=self.homo_det_eps,
+                    fallback=self.homo_fallback,
+                )
 
                 last_decoderfeats_warped, decoderfeats = self.pred_mixing(last_decoderfeats_warped, decoderfeats)
                 sim = self.sim(last_featmap_warped, featmap, size=decoderfeats.shape[-2:])

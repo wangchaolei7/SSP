@@ -55,7 +55,8 @@ def all_reduce_tensor(tensor, op=dist.ReduceOp.SUM):
     if not is_distributed():
         return tensor
     if not tensor.is_cuda:
-        tensor = tensor.to(torch.device("cuda"))
+        device = torch.device("cuda", torch.cuda.current_device())
+        tensor = tensor.to(device)
     dist.all_reduce(tensor, op=op)
     return tensor
 
@@ -63,7 +64,8 @@ def all_reduce_tensor(tensor, op=dist.ReduceOp.SUM):
 def all_reduce_scalar(value, op="mean"):
     if not is_distributed():
         return value
-    tensor = torch.tensor(value, device=torch.device("cuda"), dtype=torch.float32)
+    device = torch.device("cuda", torch.cuda.current_device())
+    tensor = torch.tensor(value, device=device, dtype=torch.float32)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     if op == "mean":
         tensor = tensor / get_world_size()
@@ -74,7 +76,8 @@ def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
 
 def merge_rank_outputs(base_dir, rank_dirs, cleanup=True):

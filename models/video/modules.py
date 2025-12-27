@@ -478,7 +478,7 @@ def label_to_onehot(gt, num_classes, ignore_index=255):
     x = gt
     x[x == ignore_index] = num_classes
     # convert label into onehot format
-    onehot = torch.zeros(N, x.size(1), x.size(2), num_classes + 1).cuda()
+    onehot = torch.zeros(N, x.size(1), x.size(2), num_classes + 1, device=x.device)
     onehot = onehot.scatter_(-1, x.unsqueeze(-1), 1)          
 
     return onehot.permute(0, 3, 1, 2)
@@ -616,7 +616,7 @@ class _ObjectAttentionBlock(nn.Module):
         value = value.permute(0, 2, 1)
 
         if self.use_gt and gt_label is not None:
-            gt_label = label_to_onehot(gt_label.squeeze(1).type(torch.cuda.LongTensor), proxy.size(2)-1)
+            gt_label = label_to_onehot(gt_label.squeeze(1).to(device=proxy.device, dtype=torch.long), proxy.size(2)-1)
             sim_map = gt_label[:, :, :, :].permute(0, 2, 3, 1).view(batch_size, h*w, -1)
             if self.use_bg:
                 bg_sim_map = 1.0 - sim_map

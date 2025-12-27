@@ -23,20 +23,33 @@ with warnings.catch_warnings():
     from models.video.models_consistency import get_model as get_video_model
     import models.video.models_consistency as models_consistency
     from utils.distributed import (
-        setup_distributed,
         cleanup_distributed,
         is_main_process,
-        get_rank,
-        get_world_size,
-        get_local_rank,
         all_reduce_scalar,
         all_reduce_tensor,
         seed_everything,
-        barrier,
         unwrap_model,
     )
 
 import argparse
+def init_distributed_and_device():
+    import os
+    import torch
+    import torch.distributed as dist
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    distributed = dist.is_available() and world_size > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+
+    if distributed and not dist.is_initialized():
+        dist.init_process_group(backend="nccl", init_method="env://")
+
+    return distributed, rank, local_rank, world_size, device
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Training Parameters")
@@ -64,14 +77,21 @@ def normalize_state_dict_keys(state_dict, model):
         return {f"module.{k}" if not k.startswith("module.") else k: v for k, v in state_dict.items()}
     return state_dict
 
+def resolve_checkpoint_path(save_dir, checkpoint_name):
+    run_dir = os.path.join(save_dir, checkpoint_name)
+    candidates = [
+        os.path.join(run_dir, "latest.pth.tar"),
+        os.path.join(run_dir, f"{checkpoint_name.split('@')[-1]}.pth.tar"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
 
 def main(config):
-    distributed = setup_distributed()
-    rank = get_rank()
-    world_size = get_world_size()
-    local_rank = get_local_rank()
+    distributed, rank, local_rank, world_size, device = init_distributed_and_device()
     date = datetime.datetime.now()
-    device = torch.device("cuda", local_rank)
     def _tqdm(*args, **kwargs):
         kwargs.setdefault("disable", not is_main_process())
         return tqdm(*args, **kwargs)
@@ -88,7 +108,10 @@ def main(config):
         with open(config, 'r') as cfg_file:
             cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
         date = datetime.datetime.strptime(checkpoint_name.split("@")[-1], "%d-%m_%H-%M") 
-        resume_checkpoint = torch.load(os.path.join(cfg["save_dir"], checkpoint_name, checkpoint_name.split("@")[-1] + ".pth.tar"), map_location="cpu")
+        resume_path = resolve_checkpoint_path(cfg["save_dir"], checkpoint_name)
+        if resume_path is None:
+            raise FileNotFoundError(f"No checkpoint found for {checkpoint_name} in {cfg['save_dir']}")
+        resume_checkpoint = torch.load(resume_path, map_location="cpu")
         if is_main_process():
             print(date)
 
@@ -98,10 +121,13 @@ def main(config):
     training_cfg = cfg["training_cfg"]
     optim_cfg = cfg["optim_cfg"]
     loss_cfg = cfg["loss_cfg"]
+    save_every = training_cfg.get("save_every", 0)
+    save_every = int(save_every) if save_every else 0
+    save_last = training_cfg.get("save_last", True)
 
     if is_main_process():
         visible_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
-        print(f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank} | GPUs={visible_gpus}")
+        print(f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank} | cuda_device={torch.cuda.current_device()} | GPUs={visible_gpus}")
 
     base_seed = cfg.get("seed", 1337)
     seed_everything(base_seed + rank)
@@ -167,12 +193,13 @@ def main(config):
 
     # Load pre-trained checkpoint
     if cfg["pretrained_checkpoint"] is not None:
-        try:
-            pretrained_checkpoint = torch.load(os.path.join(cfg["save_dir"], cfg["pretrained_checkpoint"], 
-                                                            cfg["pretrained_checkpoint"].split("@")[-1] + ".pth.tar"), map_location="cpu")
+        checkpoint_name = cfg["pretrained_checkpoint"]
+        checkpoint_path = resolve_checkpoint_path(cfg["save_dir"], checkpoint_name)
+        if checkpoint_path is not None:
+            pretrained_checkpoint = torch.load(checkpoint_path, map_location="cpu")
             state_dict = pretrained_checkpoint["model"]
-        except:
-            state_dict = torch.load(cfg["pretrained_checkpoint"])
+        else:
+            state_dict = torch.load(checkpoint_name)
         state_dict = normalize_state_dict_keys(state_dict, model)
         unwrap_model(model).load_state_dict(state_dict, strict=False)
 
@@ -181,6 +208,7 @@ def main(config):
             model,
             device_ids=[local_rank],
             output_device=local_rank,
+            broadcast_buffers=False,
         )
     core_model = unwrap_model(model)
 
@@ -288,7 +316,19 @@ def main(config):
                 "val_miou2": val_miou2,
                 "val_classes_mIoU": val_classes_mIoU
             }
-            save_name = save_model(save_dict, cfg, cfg["save_dir"], date, per_classes_mIoU=per_classes_mIoU)
+            save_name = save_model(
+                save_dict,
+                cfg,
+                cfg["save_dir"],
+                date,
+                per_classes_mIoU=per_classes_mIoU,
+                checkpoint_name="latest.pth.tar",
+                save_checkpoint=save_last,
+            )
+            if save_every > 0 and (epoch + 1) % save_every == 0:
+                run_dir = os.path.join(cfg["save_dir"], date.strftime("%d-%m_%H-%M"))
+                milestone_name = f"epoch_{epoch+1:04d}.pth.tar"
+                torch.save(save_dict, os.path.join(run_dir, milestone_name))
 
     return save_name
 
