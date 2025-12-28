@@ -10,6 +10,10 @@ from data.apolloscape_dataset import (
     ApolloScapeVideoLogitsDataset,
 )
 from data.dataset_utils import parse_datasets, get_transforms
+from data.cityscapes_sequence_dataset import (
+    CityscapesSequenceCorruptionsDataset,
+    CITYSCAPES_SEQ_CORRUPT,
+)
 
 
 def _validate_num_classes(data_cfg, DATASET):
@@ -150,31 +154,62 @@ def prep_image_dataset(data_cfg):
 
 
 def prep_infer_image_dataset(data_cfg, split="val", val_skip_frames=1):
-    DATASET, data_folder, video_train_idx, video_val_idx = parse_datasets(data_cfg["dataset"], path=data_cfg["path"], split=split)
-    video_indices = video_train_idx if split == "train" else video_val_idx
-    _validate_num_classes(data_cfg, DATASET)
-    _, _, frame_transforms, mask_transforms = get_transforms("image", data_cfg["crop_size"], DATASET, data_augmentation=False)
-    if data_cfg["dataset"].lower() == "apolloscape":
-        video_dataset = ApolloScapeImageInferenceDataset(
-            data_folder,
-            video_indices,
+    dataset_name = data_cfg["dataset"].lower()
+    if dataset_name == "cityscapes_seq_corrupt":
+        DATASET = CITYSCAPES_SEQ_CORRUPT
+        _validate_num_classes(data_cfg, DATASET)
+        root_images = data_cfg.get("root_images")
+        root_labels = data_cfg.get("root_labels")
+        corruption = data_cfg.get("corruption")
+        if not root_images or not root_labels:
+            raise ValueError("cityscapes_seq_corrupt requires data_cfg.root_images and data_cfg.root_labels")
+        if not corruption:
+            raise ValueError("cityscapes_seq_corrupt requires data_cfg.corruption")
+        _, _, frame_transforms, mask_transforms = get_transforms(
+            "image", data_cfg["crop_size"], DATASET, data_augmentation=False
+        )
+        video_dataset = CityscapesSequenceCorruptionsDataset(
+            root_images,
+            root_labels,
+            corruption,
             DATASET,
             data_cfg,
             split=split,
             img_transforms=frame_transforms,
             segmentation_transforms=mask_transforms,
             val_skip_frames=val_skip_frames,
+            log_stats=is_main_process(),
         )
     else:
-        video_dataset = ImageInferenceDataset(
-            data_folder,
-            video_indices,
-            DATASET,
-            data_cfg,
-            img_transforms=frame_transforms,
-            segmentation_transforms=mask_transforms,
-            val_skip_frames=val_skip_frames,
+        DATASET, data_folder, video_train_idx, video_val_idx = parse_datasets(
+            data_cfg["dataset"], path=data_cfg["path"], split=split
         )
+        video_indices = video_train_idx if split == "train" else video_val_idx
+        _validate_num_classes(data_cfg, DATASET)
+        _, _, frame_transforms, mask_transforms = get_transforms(
+            "image", data_cfg["crop_size"], DATASET, data_augmentation=False
+        )
+        if dataset_name == "apolloscape":
+            video_dataset = ApolloScapeImageInferenceDataset(
+                data_folder,
+                video_indices,
+                DATASET,
+                data_cfg,
+                split=split,
+                img_transforms=frame_transforms,
+                segmentation_transforms=mask_transforms,
+                val_skip_frames=val_skip_frames,
+            )
+        else:
+            video_dataset = ImageInferenceDataset(
+                data_folder,
+                video_indices,
+                DATASET,
+                data_cfg,
+                img_transforms=frame_transforms,
+                segmentation_transforms=mask_transforms,
+                val_skip_frames=val_skip_frames,
+            )
 
     if is_main_process():
         print(f"Inference dataset contains {len(video_dataset)} videos")

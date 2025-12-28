@@ -19,6 +19,7 @@ with warnings.catch_warnings():
     from utils.distributed import (
         setup_distributed,
         cleanup_distributed,
+        is_distributed,
         is_main_process,
         get_rank,
         get_world_size,
@@ -49,14 +50,17 @@ def _iou_from_confusion(confusion):
     iou = intersection / (union + 1e-6)
     return iou, union
 
-def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res):
+def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res, output_subdir=None, data_cfg_override=None):
     distributed = setup_distributed()
+    distributed = distributed or is_distributed()
     rank = get_rank()
     world_size = get_world_size()
     local_rank = get_local_rank()
     device = torch.device("cuda", local_rank)
     with open(config, 'r') as cfg_file:
         cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
+    if data_cfg_override:
+        cfg["data_cfg"].update(data_cfg_override)
     data_cfg = cfg["data_cfg"]
     image_model_cfg = cfg["image_model_cfg"]
     video_model_cfg = cfg["video_model_cfg"]
@@ -78,6 +82,8 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
         checkpoint = None
 
     vis_dir = os.path.join(cfg["save_dir"], checkpoint_name)
+    if output_subdir:
+        vis_dir = os.path.join(vis_dir, output_subdir)
     output_root = vis_dir if not distributed else os.path.join(vis_dir, f"rank_{rank}")
     save_folder = os.path.join(output_root, split)
     save_folder_colored = os.path.join(output_root, split + "_colored")
@@ -263,7 +269,8 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
         global_miou = iou[valid].mean().item() if valid.any() else 0.0
         global_per_classes_mIoU = {v: iou[k-1].item() for (k, v) in DATASET.classes.items() if k > 0} if DATASET.ignore_index > 0 else {v: iou[k].item() for (k, v) in DATASET.classes.items()}
 
-        tc_sum = torch.tensor(tc.sum, device=device)
+        # tc_sum = torch.tensor(tc.sum, device=device)
+        tc_sum = tc.sum.to(device) if torch.is_tensor(tc.sum) else torch.as_tensor(tc.sum, device=device)
         tc_count = torch.tensor(tc.count, device=device)
         if distributed:
             tc_sum = all_reduce_tensor(tc_sum)
@@ -302,6 +309,18 @@ def parse_args():
     parser.add_argument("--split", required=False, type=str, default="val", help="Data split to visualize")
     parser.add_argument("--gpus", required=False, type=str, default=None,
                         help="Comma-separated GPU ids to use, e.g. \"0,1,3\"")
+    parser.add_argument("--dataset", required=False, type=str, default=None,
+                        help="Override dataset name from config")
+    parser.add_argument("--corruption", required=False, type=str, default=None,
+                        help="Single corruption name for cityscapes_seq_corrupt")
+    parser.add_argument("--corruptions", required=False, type=str, default=None,
+                        help="Comma-separated corruptions, e.g. fog,frost,snow,spatter")
+    parser.add_argument("--city-root-images", required=False, type=str, default=None,
+                        help="Root folder for Cityscapes corrupted images")
+    parser.add_argument("--city-root-labels", required=False, type=str, default=None,
+                        help="Root folder for Cityscapes gtFine labels")
+    parser.add_argument("--output-subdir", required=False, type=str, default=None,
+                        help="Optional subdir under checkpoint output directory")
     parser.add_argument('--evaluation', dest='evaluation', action='store_true', help='Compute metrics (default)')
     parser.add_argument('--no-evaluation', dest='evaluation', action='store_false', help='Don\'t compute metrics')
     parser.add_argument('--best-model', dest='best_model', action='store_true', help='Use best checkpoint')
@@ -325,5 +344,50 @@ if __name__=='__main__':
     evaluation = args.evaluation
     best_model = args.best_model
     write_res = args.write_res
-    main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res)
+    def _build_data_cfg_override(corruption):
+        override = {}
+        if args.dataset:
+            override["dataset"] = args.dataset
+        elif corruption:
+            override["dataset"] = "cityscapes_seq_corrupt"
+        if corruption:
+            override["corruption"] = corruption
+        if args.city_root_images:
+            override["root_images"] = args.city_root_images
+        if args.city_root_labels:
+            override["root_labels"] = args.city_root_labels
+        return override or None
+
+    corruptions = []
+    if args.corruptions:
+        corruptions = [c.strip() for c in args.corruptions.split(",") if c.strip()]
+    elif args.corruption:
+        corruptions = [args.corruption.strip()]
+
+    if corruptions:
+        for corruption in corruptions:
+            output_subdir = os.path.join("cityscapes_corruptions", corruption)
+            main(
+                config,
+                checkpoint_name,
+                checkpoint_folder,
+                split,
+                evaluation,
+                best_model,
+                write_res,
+                output_subdir=output_subdir,
+                data_cfg_override=_build_data_cfg_override(corruption),
+            )
+    else:
+        main(
+            config,
+            checkpoint_name,
+            checkpoint_folder,
+            split,
+            evaluation,
+            best_model,
+            write_res,
+            output_subdir=args.output_subdir,
+            data_cfg_override=_build_data_cfg_override(None),
+        )
     cleanup_distributed()
