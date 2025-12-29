@@ -79,6 +79,7 @@ def main(config):
     training_cfg = cfg["training_cfg"]
     optim_cfg = cfg["optim_cfg"]
     loss_cfg = cfg["loss_cfg"]
+    save_every = int(training_cfg.get("save_every", 0) or 0)
 
     if is_main_process():
         visible_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
@@ -274,6 +275,10 @@ def main(config):
                 "val_classes_mIoU": val_classes_mIoU
             }
             save_name = save_model(save_dict, cfg, cfg["save_dir"], date, DATASET)
+            if save_every > 0 and (epoch + 1) % save_every == 0:
+                run_dir = os.path.join(cfg["save_dir"], save_name)
+                milestone_name = f"epoch_{epoch+1:04d}.pth.tar"
+                torch.save(save_dict, os.path.join(run_dir, milestone_name))
 
     return save_name
 

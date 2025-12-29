@@ -191,8 +191,10 @@ def save_model(save_dict, cfg, save_dir, date, DATASET):
     train_per_classes_mIoU = {v: train_classes_mIoU[k-1].item() for (k,v) in DATASET.classes.items() if k>0} if DATASET.ignore_index > 0 else {v: train_classes_mIoU[k].item() for (k,v) in DATASET.classes.items()}
 
     save_name = f"{date_str}"
-    if not os.path.exists(os.path.join(save_dir, save_name)):
-        os.mkdir(os.path.join(save_dir, save_name))
+    os.makedirs(save_dir, exist_ok=True)
+    run_dir = os.path.join(save_dir, save_name)
+    if not os.path.exists(run_dir):
+        os.mkdir(run_dir)
     with open(os.path.join(save_dir, save_name, save_name + "_config.yaml"), "w") as file:
         yaml.dump(cfg, file, default_flow_style=False, sort_keys=False)
 

@@ -1,0 +1,96 @@
+# Folder where the checkpoint will be saved
+save_dir: /home/wangcl/project/SSP/kitti360/image
+# Weights (of the same architecture) to load before training, leave null if no pre-training. Checkpoint should be in save_dir
+pretrained_checkpoint: null
+# Resume the training of a checkpoint in save_dir. The rest of this config will be discarded.
+resume_training: "28-12_21-56"
+# Untrained checkpoint
+no_training: false
+
+data_cfg:
+  # Identifying name of the dataset, see data.datasets_utils.parse_datasets
+  dataset: kitti360
+  # Root folder containing train/val splits
+  path: /home/wangcl/data/open_video_DGSS/kitti360_sequence
+  # Root folders for images and labels (use GT as source of truth)
+  root_images: /home/wangcl/data/open_video_DGSS/kitti360_sequence/train/data_2d_raw
+  root_labels: /home/wangcl/data/open_video_DGSS/kitti360_sequence/train/data_2d_semantics
+  # Subfolders used to find RGB frames and labels
+  frame_folder: data_rect
+  mask_folder: 15semantic
+  # Label naming rule: <stem> + label_extension
+  img_extension: .png
+  label_extension: .png
+  # Dataset classes
+  num_classes: 15
+  # Strict pairing: error on missing pairs (true) or warn + skip (false)
+  strict_pairs: false
+  # Input size, as [Height, Width]
+  crop_size:
+  - 736
+  - 1280
+  # Random square cropping during training to save memory (only used for the teacher model)
+  square_crop: false
+  # Enable data augmentation during training
+  data_augmentation: true
+  # Indicate if the labels are a probabilty distribution instead of class labels. For knowledge distillation.
+  soft_labels: false
+  # Enables knowledge distillation for the dataset. See data.image.image_dataset.ImageLogitsDataset
+  logit_distillation: false
+  # Location of the logits from the teacher model for knowledge distillation. Should point to the train_logits folder of the teacher model´s results
+  logits_folder: null
+  # Min number of frames for a video to be counted.
+  min_vid_len: 0
+  # Number of labeled frames used for training per video. Should use train_skip_frames instead.
+  labeled_frames_per_vid: null
+  # Number of frames to skip between training samples. Should only be used for knowledge distillation or when the dataset is fully labeled.
+  train_skip_frames: null
+  # Number of frames to skip during validation step. Only useful for fully labeled datasets. Leave to 1 for others.
+  val_skip_frames: 1
+  # Cap validation samples to reduce memory during metric aggregation (DDP eval)
+  val_max_samples: 2000
+
+# See video config for details
+training_cfg:
+  batch_size: 12
+  num_epochs: 250
+  early_stopping: 200
+  num_workers: 1
+  lr: 2.5e-05
+  save_every: 1
+
+# See video config for details
+optim_cfg:
+  optimizer: adamw
+  scheduler: cosine
+  weight_decay: 0.05
+  # Optimizer
+  momentum: 0.9
+  # Scheduler
+  warmup_epochs: 2
+  scheduler_power: 0.9
+  start_lr: 0.0001
+  final_lr: 0.0001
+
+# See video config for details
+loss_cfg:
+  loss_func: crossentropy
+  class_weights: null
+  softmax_on_target: false
+  temperature: 1
+
+model_cfg:
+  ## Model configuration
+  # model checkpoint to use:
+  #     Segformer: "nvidia/mit-b3" or "nvidia/segformer-b3-finetuned-cityscapes-1024-1024" or "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
+  #     UPerNet: "openmmlab/upernet-swin-small" or "openmmlab/upernet-convnext-small"
+  #     Hiera-sam: "tiny", "small", "base_plus"
+  checkpoint_model: "small"
+
+  # Model architecture to use: "Segformer"/"UPerNet"/"hierasam_upernet"
+  # Set it as per the model checkpoint used
+  model_architecture: "hierasam_upernet"
+  # Never used
+  frozen_encoder: false
+  # Interpolation method for the upsampling. Should be consistent with the image model config.
+  upsampling: "bicubic"

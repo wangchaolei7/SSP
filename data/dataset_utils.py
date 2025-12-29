@@ -1,5 +1,5 @@
 import os
-from data.datasets import UAVID, RURALSCAPES, APOLLOSCAPE
+from data.datasets import UAVID, RURALSCAPES, APOLLOSCAPE, KITTI360
 
 import cv2
 import data.utils.images_transforms as image_transforms
@@ -16,6 +16,8 @@ def parse_datasets(name, path=None, split="train"):
         DATASET = RURALSCAPES
     elif name == "apolloscape":
         DATASET = APOLLOSCAPE
+    elif name == "kitti360":
+        DATASET = KITTI360
     assert DATASET is not None, f"Dataset {name} not implemented"
 
     if path is None:
@@ -29,6 +31,30 @@ def parse_datasets(name, path=None, split="train"):
             if not os.path.isdir(frame_root):
                 raise FileNotFoundError(f"ApolloScape split not found: {frame_root}")
             records = [d for d in os.listdir(frame_root) if os.path.isdir(os.path.join(frame_root, d))]
+            records.sort()
+            return records
+
+        if split == "test":
+            test_split = "test" if os.path.isdir(os.path.join(path, "test")) else "val"
+            video_train_idx = None
+            video_val_idx = list_records(test_split)
+        else:
+            video_train_idx = list_records("train")
+            video_val_idx = list_records("val")
+        return DATASET, data_folder, video_train_idx, video_val_idx
+
+    if name == "kitti360":
+        data_folder = path
+
+        def list_records(split_name):
+            label_root = os.path.join(path, split_name, "data_2d_semantics")
+            if not os.path.isdir(label_root):
+                raise FileNotFoundError(f"KITTI-360 split not found: {label_root}")
+            records = []
+            for d in os.listdir(label_root):
+                label_dir = os.path.join(label_root, d, "image_00", DATASET.mask_folder)
+                if os.path.isdir(label_dir):
+                    records.append(d)
             records.sort()
             return records
 
