@@ -50,7 +50,7 @@ def _iou_from_confusion(confusion):
     iou = intersection / (union + 1e-6)
     return iou, union
 
-def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res, output_subdir=None, data_cfg_override=None):
+def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res, output_subdir=None, data_cfg_override=None, checkpoint_path=None):
     distributed = setup_distributed()
     distributed = distributed or is_distributed()
     rank = get_rank()
@@ -69,17 +69,38 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
     if is_main_process():
         visible_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
         print(f"Distributed: {distributed} | world_size={world_size} | rank={rank} | local_rank={local_rank} | GPUs={visible_gpus}")
-    if os.path.exists(os.path.join(save_dir, checkpoint_folder + checkpoint_name, checkpoint_name.split("@")[-1] + ".pth.tar")):
-        if best_model:
-            checkpoint = torch.load(os.path.join(save_dir, checkpoint_folder + checkpoint_name, "best_model_3_" + checkpoint_name.split("@")[-1] + ".pth.tar"), map_location="cpu")
-            if is_main_process():
-                print("Loaded best checkpoint at epoch {}".format(checkpoint["epoch"]))
-        else:
-            checkpoint = torch.load(os.path.join(save_dir, checkpoint_folder + checkpoint_name, checkpoint_name.split("@")[-1] + ".pth.tar"), map_location="cpu")
-            if is_main_process():
-                print("Loaded last checkpoint")
+    checkpoint = None
+    checkpoint_loaded_path = None
+    if checkpoint_path:
+        checkpoint_loaded_path = os.path.abspath(os.path.expanduser(checkpoint_path))
+        if not os.path.isfile(checkpoint_loaded_path):
+            raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_loaded_path}")
+        checkpoint = torch.load(checkpoint_loaded_path, map_location="cpu")
     else:
-        checkpoint = None
+        default_path = os.path.join(
+            save_dir,
+            checkpoint_folder + checkpoint_name,
+            checkpoint_name.split("@")[-1] + ".pth.tar",
+        )
+        if os.path.exists(default_path):
+            if best_model:
+                checkpoint_loaded_path = os.path.join(
+                    save_dir,
+                    checkpoint_folder + checkpoint_name,
+                    "best_model_3_" + checkpoint_name.split("@")[-1] + ".pth.tar",
+                )
+                checkpoint = torch.load(checkpoint_loaded_path, map_location="cpu")
+                if is_main_process():
+                    print("Loaded best checkpoint at epoch {}".format(checkpoint["epoch"]))
+            else:
+                checkpoint_loaded_path = default_path
+                checkpoint = torch.load(checkpoint_loaded_path, map_location="cpu")
+                if is_main_process():
+                    print("Loaded last checkpoint")
+        else:
+            checkpoint = None
+    if is_main_process() and checkpoint_loaded_path:
+        print(f"Using checkpoint: {checkpoint_loaded_path}")
 
     vis_dir = os.path.join(cfg["save_dir"], checkpoint_name)
     if output_subdir:
@@ -306,6 +327,8 @@ def parse_args():
     parser.add_argument("--save-dir", required=False, type=str, default="checkpoints",
                          help="Folder where checkpoint (and its config) is located. Should be in config file")
     parser.add_argument("--checkpoint-folder", required=False, type=str, default="", help="Subfolder of checkpoint")
+    parser.add_argument("--checkpoint-path", required=False, type=str, default=None,
+                        help="Optional explicit checkpoint file path to load")
     parser.add_argument("--split", required=False, type=str, default="val", help="Data split to visualize")
     parser.add_argument("--gpus", required=False, type=str, default=None,
                         help="Comma-separated GPU ids to use, e.g. \"0,1,3\"")
@@ -327,9 +350,12 @@ def parse_args():
     parser.add_argument('--no-best-model', dest='best_model', action='store_false', help='Use last checkpoint (default)')
     parser.add_argument('--write-res', dest='write_res', action='store_true', help='Write results to disk (default)')
     parser.add_argument('--no-write-res', dest='write_res', action='store_false', help='Do not write results to disk')
+    parser.add_argument('--metrics-only', dest='metrics_only', action='store_true',
+                        help='Compute metrics only (implies --no-write-res)')
     parser.set_defaults(best_model=False)
     parser.set_defaults(evaluation=True)
     parser.set_defaults(write_res=True)
+    parser.set_defaults(metrics_only=False)
     return parser.parse_args()
 
 if __name__=='__main__':
@@ -344,6 +370,9 @@ if __name__=='__main__':
     evaluation = args.evaluation
     best_model = args.best_model
     write_res = args.write_res
+    if args.metrics_only:
+        evaluation = True
+        write_res = False
     def _build_data_cfg_override(corruption):
         override = {}
         if args.dataset:
@@ -372,12 +401,13 @@ if __name__=='__main__':
                 checkpoint_name,
                 checkpoint_folder,
                 split,
-                evaluation,
-                best_model,
-                write_res,
-                output_subdir=output_subdir,
-                data_cfg_override=_build_data_cfg_override(corruption),
-            )
+            evaluation,
+            best_model,
+            write_res,
+            output_subdir=output_subdir,
+            data_cfg_override=_build_data_cfg_override(corruption),
+            checkpoint_path=args.checkpoint_path,
+        )
     else:
         main(
             config,
@@ -389,5 +419,6 @@ if __name__=='__main__':
             write_res,
             output_subdir=args.output_subdir,
             data_cfg_override=_build_data_cfg_override(None),
+            checkpoint_path=args.checkpoint_path,
         )
     cleanup_distributed()
