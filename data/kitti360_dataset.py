@@ -499,6 +499,7 @@ class Kitti360VideoDataset(Dataset, Kitti360Base):
             for key in self._scan_stats:
                 self._scan_stats[key] += stats[key]
             self._scan_warnings.extend(warnings)
+            self.labels_by_video[v_name] = label_set
 
             min_vid_len = (
                 max(
@@ -525,7 +526,6 @@ class Kitti360VideoDataset(Dataset, Kitti360Base):
 
             self.videos.append(frames)
             self.video_names.append(v_name)
-            self.labels_by_video[v_name] = label_set
             v_idx += 1
 
         self._val_samples_limited = False
