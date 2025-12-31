@@ -16,6 +16,13 @@ from data.kitti360_dataset import (
     Kitti360VideoDataset,
     Kitti360VideoLogitsDataset,
 )
+from data.camvid_dataset import (
+    CamVidImageDataset,
+    CamVidImageInferenceDataset,
+    CamVidImageLogitsDataset,
+    CamVidVideoDataset,
+    CamVidVideoLogitsDataset,
+)
 from data.dataset_utils import parse_datasets, get_transforms
 from data.cityscapes_sequence_dataset import (
     CityscapesSequenceCorruptionsDataset,
@@ -80,6 +87,29 @@ def prep_video_dataset(data_cfg):
             segmentation_transforms=mask_transforms,
         )
         val_dataset = Kitti360VideoDataset(
+            data_folder,
+            video_val_idx,
+            DATASET,
+            data_cfg,
+            split="val",
+            training=False,
+            img_transforms=frame_transforms_val,
+            segmentation_transforms=mask_transforms,
+        )
+    elif dataset_name == "camvid":
+        traindatasetclass = CamVidVideoLogitsDataset if data_cfg.get("logit_distillation", False) else CamVidVideoDataset
+        train_dataset = traindatasetclass(
+            data_folder,
+            video_train_idx,
+            DATASET,
+            data_cfg,
+            split="train",
+            training=True,
+            joint_transforms=augmentations,
+            img_transforms=frame_transforms,
+            segmentation_transforms=mask_transforms,
+        )
+        val_dataset = CamVidVideoDataset(
             data_folder,
             video_val_idx,
             DATASET,
@@ -178,6 +208,31 @@ def prep_image_dataset(data_cfg):
             img_transforms=frame_transforms_val,
             segmentation_transforms=mask_transforms,
         )
+    elif dataset_name == "camvid":
+        traindatasetclass = CamVidImageLogitsDataset if data_cfg.get("logit_distillation", False) else CamVidImageDataset
+        train_dataset = traindatasetclass(
+            data_folder,
+            video_train_idx,
+            DATASET,
+            data_cfg,
+            split="train",
+            training=True,
+            joint_transforms=augmentations,
+            img_transforms=frame_transforms,
+            segmentation_transforms=mask_transforms,
+        )
+
+        val_dataset = CamVidImageDataset(
+            data_folder,
+            video_val_idx,
+            DATASET,
+            data_cfg,
+            split="val",
+            training=False,
+            joint_transforms=None,
+            img_transforms=frame_transforms_val,
+            segmentation_transforms=mask_transforms,
+        )
     else:
         traindatasetclass = ImageLogitsDataset if data_cfg.get("logit_distillation", False) else ImageDataset
         train_dataset = traindatasetclass(
@@ -259,6 +314,17 @@ def prep_infer_image_dataset(data_cfg, split="val", val_skip_frames=1):
             )
         elif dataset_name == "kitti360":
             video_dataset = Kitti360ImageInferenceDataset(
+                data_folder,
+                video_indices,
+                DATASET,
+                data_cfg,
+                split=split,
+                img_transforms=frame_transforms,
+                segmentation_transforms=mask_transforms,
+                val_skip_frames=val_skip_frames,
+            )
+        elif dataset_name == "camvid":
+            video_dataset = CamVidImageInferenceDataset(
                 data_folder,
                 video_indices,
                 DATASET,
