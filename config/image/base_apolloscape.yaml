@@ -1,5 +1,5 @@
 # Folder where the checkpoint will be saved
-save_dir: /data1/wangcl/project/SSP
+save_dir: /data1/wangcl/project/SSP/apollo
 # Weights (of the same architecture) to load before training, leave null if no pre-training. Checkpoint should be in save_dir
 pretrained_checkpoint: null
 # Resume the training of a checkpoint in save_dir. The rest of this config will be discarded.

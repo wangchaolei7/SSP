@@ -1,0 +1,51 @@
+save_dir: /data1/wangcl/project/SSP/apollo
+pretrained_checkpoint: null
+resume_training: null
+no_training: false
+data_cfg:
+  dataset: apolloscape
+  path: /home/wangcl/data/open_video_DGSS/ApolloScape
+  frame_folder: ColorImage
+  mask_folder: 15Label
+  label_suffix: _bin
+  img_extension: .jpg
+  label_extension: .png
+  num_classes: 15
+  strict_pairs: false
+  crop_size:
+  - 736
+  - 1280
+  square_crop: false
+  data_augmentation: true
+  soft_labels: false
+  logit_distillation: false
+  logits_folder: null
+  min_vid_len: 0
+  labeled_frames_per_vid: null
+  train_skip_frames: null
+  val_skip_frames: 1
+training_cfg:
+  batch_size: 12
+  num_epochs: 250
+  early_stopping: 200
+  num_workers: 4
+  lr: 2.5e-05
+optim_cfg:
+  optimizer: adamw
+  scheduler: cosine
+  weight_decay: 0.05
+  momentum: 0.9
+  warmup_epochs: 2
+  scheduler_power: 0.9
+  start_lr: 0.0001
+  final_lr: 0.0001
+loss_cfg:
+  loss_func: crossentropy
+  class_weights: null
+  softmax_on_target: false
+  temperature: 1
+model_cfg:
+  checkpoint_model: small
+  model_architecture: hierasam_upernet
+  frozen_encoder: false
+  upsampling: bicubic

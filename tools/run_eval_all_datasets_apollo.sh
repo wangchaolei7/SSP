@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+
+# Edit parameters here.
+NPROC=6
+CHECKPOINT_NAME="26-12_00-23"
+SAVE_DIR="/data1/wangcl/project/SSP/apollo"
+CHECKPOINT_FOLDER="video/"
+SPLIT="val"
+# Set to 1 for metrics only (no visualization output).
+METRICS_ONLY=1
+# Extra args passed to eval.vis.video (leave empty if unused).
+EXTRA_ARGS=""
+
+CITY_ROOT_ORIGIN="${CITY_ROOT_ORIGIN:-/home/wangcl/data/open_video_DGSS/cityscapes_sequence}"
+CITY_ROOT_CORR="${CITY_ROOT_CORR:-/home/wangcl/data/open_video_DGSS/cityscapes_sequence/leftImg8bit_sequence_Corruptions}"
+CITY_ROOT_LABELS="${CITY_ROOT_LABELS:-/home/wangcl/data/open_video_DGSS/cityscapes_sequence/gtFine}"
+
+run_eval() {
+  local name="$1"
+  shift
+  echo "[eval] ${name}"
+  local common_args=()
+  if [[ "${METRICS_ONLY}" == "1" ]]; then
+    common_args+=(--metrics-only)
+  fi
+  if [[ -n "${EXTRA_ARGS}" ]]; then
+    # shellcheck disable=SC2206
+    common_args+=(${EXTRA_ARGS})
+  fi
+  torchrun --nproc_per_node="${NPROC}" -m eval.vis.video "${CHECKPOINT_NAME}" \
+    --save-dir "${SAVE_DIR}" \
+    --checkpoint-folder "${CHECKPOINT_FOLDER}" \
+    --split "${SPLIT}" \
+    --output-subdir "${name}" \
+    "${common_args[@]}" \
+    "$@"
+}
+
+# run_eval "apollo" --dataset apolloscape
+# run_eval "camvid" --dataset camvid
+# run_eval "kitti360" --dataset kitti360
+# run_eval "cityscapes_origin" \
+#   --corruption origin_leftImg8bit_sequence \
+#   --city-root-images "${CITY_ROOT_ORIGIN}" \
+#   --city-root-labels "${CITY_ROOT_LABELS}"
+
+# for corruption in fog frost snow spatter; do
+#   run_eval "cityscapes_${corruption}" \
+#     --corruption "${corruption}" \
+#     --city-root-images "${CITY_ROOT_CORR}" \
+#     --city-root-labels "${CITY_ROOT_LABELS}"
+# done
+for corruption in frost snow spatter; do
+  run_eval "cityscapes_${corruption}" \
+    --corruption "${corruption}" \
+    --city-root-images "${CITY_ROOT_CORR}" \
+    --city-root-labels "${CITY_ROOT_LABELS}"
+done

@@ -22,21 +22,21 @@ class CITYSCAPES_SEQ_CORRUPT:
         return mask
     classes = {
         0: "background",
-        1: "class_0",
-        2: "class_1",
-        3: "class_2",
-        4: "class_3",
-        5: "class_4",
-        6: "class_5",
-        7: "class_6",
-        8: "class_7",
-        9: "class_8",
-        10: "class_9",
-        11: "class_10",
-        12: "class_11",
-        13: "class_12",
-        14: "class_13",
-        15: "class_14",
+        1: "road",
+        2: "sidewalk",
+        3: "building",
+        4: "wall",
+        5: "fence",
+        6: "pole",
+        7: "traffic light",
+        8: "traffic sign",
+        9: "vegetation",
+        10: "sky",
+        11: "person",
+        12: "rider",
+        13: "car",
+        14: "Truck_Bus",
+        15: "motorcycle",
     }
     colors = {
         0: (0, 0, 0),
@@ -49,12 +49,12 @@ class CITYSCAPES_SEQ_CORRUPT:
         7: (250, 170, 30),
         8: (220, 220, 0),
         9: (107, 142, 35),
-        10: (152, 251, 152),
-        11: (70, 130, 180),
-        12: (220, 20, 60),
-        13: (255, 0, 0),
-        14: (0, 0, 142),
-        15: (0, 60, 100),
+        10: (70, 130, 180),
+        11: (220, 20, 60),
+        12: (255, 0, 0),
+        13: (0, 0, 142),
+        14: (0, 60, 100),
+        15: (0, 0, 230),
     }
 
 
@@ -170,37 +170,32 @@ class CityscapesSequenceCorruptionsDataset(Dataset):
                 if not label_map:
                     continue
 
-                matched = []
-                for img_file in image_files:
+                if len(image_files) < self.min_vid_len + 1:
+                    continue
+
+                matched = 0
+                frames_names = []
+                frame_paths = []
+                labels_names = []
+                label_paths = []
+                for idx, img_file in enumerate(image_files):
                     base_id = _base_id_from_image(img_file)
                     logical_label = _canonical_label_name(base_id)
                     label_path = label_map.get(logical_label)
-                    if label_path is None:
+                    if label_path is not None:
+                        matched += 1
+                    if not self.isinfered(idx):
                         continue
-                    matched.append(
-                        (
-                            img_file,
-                            os.path.join(img_dir, img_file),
-                            logical_label,
-                            label_path,
-                        )
-                    )
+                    frames_names.append(img_file)
+                    frame_paths.append(os.path.join(img_dir, img_file))
+                    if label_path is not None:
+                        labels_names.append(logical_label)
+                        label_paths.append(label_path)
 
-                if len(matched) < self.min_vid_len + 1:
+                if not frames_names:
                     continue
 
-                self.total_matched += len(matched)
-
-                filtered = [
-                    item for idx, item in enumerate(matched) if self.isinfered(idx)
-                ]
-                if not filtered:
-                    continue
-
-                frames_names = [item[0] for item in filtered]
-                frame_paths = [item[1] for item in filtered]
-                labels_names = [item[2] for item in filtered]
-                label_paths = [item[3] for item in filtered]
+                self.total_matched += matched
                 v_name = os.path.join(city, seq)
 
                 self.videos.append(

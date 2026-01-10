@@ -1,0 +1,70 @@
+save_dir: /data1/wangcl/project/SSP/video
+pretrained_checkpoint: null
+resume_training: null
+data_cfg:
+  dataset: apolloscape
+  path: /home/wangcl/data/open_video_DGSS/ApolloScape
+  frame_folder: ColorImage
+  mask_folder: 15Label
+  label_suffix: _bin
+  img_extension: .jpg
+  label_extension: .png
+  num_classes: 15
+  strict_pairs: false
+  adjacent_frames:
+  - -1
+  crop_size:
+  - 736
+  - 1280
+  square_crop: true
+  data_augmentation: true
+  soft_labels: false
+  logit_distillation: false
+  logits_folder: null
+  min_vid_len: 0
+  labeled_frames_per_vid: null
+  train_skip_frames: null
+  val_skip_frames: 1
+  opencv_homos: false
+  opencv_model_type: akaze
+image_model_cfg:
+  image_save_dir: /data1/wangcl/project/SSP
+  checkpoint_folder: ''
+  checkpoint_name: 24-12_18-40
+  best_model: false
+video_model_cfg:
+  model_name: base
+  const_loss_lb: 0.5
+  kd_consistent_labels: true
+  last_out_loss_lb: 1.0
+  pred_mixing_op: id
+  sim_op: conv
+  upsample_before_mixing: true
+  upsampling: bicubic
+  k_registrator_model: disk
+  homo_det_eps: 1.0e-08
+  homo_fallback: identity
+training_cfg:
+  num_epochs: 250
+  early_stopping: 200
+  batch_size: 8
+  num_workers: 8
+  lr: 5.0e-05
+  trained_layer: null
+  secondary_lr: 0.0001
+  save_every: 20
+  save_last: true
+optim_cfg:
+  optimizer: adamw
+  scheduler: cosine
+  weight_decay: 0.05
+  momentum: 0.9
+  warmup_epochs: 2
+  scheduler_power: 0.9
+  start_lr: 0.0001
+  final_lr: 0.0001
+loss_cfg:
+  loss_func: crossentropy
+  class_weights: null
+  softmax_on_target: true
+  temperature: 2

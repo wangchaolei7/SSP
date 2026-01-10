@@ -24,7 +24,7 @@ with warnings.catch_warnings():
         barrier,
         all_reduce_tensor,
         merge_rank_outputs,
-        DistributedEvalSampler,
+        SequenceDistributedSampler,
     )
 
 def scale_img(img, scale):
@@ -105,7 +105,7 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
 
     # Dataset 
     video_dataset, DATASET = prep_infer_image_dataset(data_cfg, split=split, val_skip_frames=skip_frames)
-    sampler = DistributedEvalSampler(video_dataset, shuffle=False) if distributed else None
+    sampler = SequenceDistributedSampler(video_dataset, shuffle=False) if distributed else None
     video_loader = DataLoader(
         video_dataset,
         batch_size=1,

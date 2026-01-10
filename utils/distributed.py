@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 import math
+from datetime import timedelta
 
 
 def is_distributed():
@@ -35,7 +36,19 @@ def unwrap_model(model):
 def setup_distributed():
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size > 1 and not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://")
+        timeout = None
+        timeout_env = os.environ.get("DIST_TIMEOUT", "").strip()
+        if timeout_env:
+            try:
+                timeout_val = float(timeout_env)
+            except ValueError:
+                timeout_val = None
+            if timeout_val and timeout_val > 0:
+                timeout = timedelta(seconds=timeout_val)
+        if timeout is not None:
+            dist.init_process_group(backend="nccl", init_method="env://", timeout=timeout)
+        else:
+            dist.init_process_group(backend="nccl", init_method="env://")
         torch.cuda.set_device(get_local_rank())
         return True
     return False
@@ -114,3 +127,58 @@ class DistributedEvalSampler(DistributedSampler):
         if len(self.dataset) <= self.rank:
             return 0
         return math.ceil((len(self.dataset) - self.rank) / self.num_replicas)
+
+
+def _infer_sequence_lengths(dataset):
+    if hasattr(dataset, "sequence_lengths"):
+        lengths = list(dataset.sequence_lengths)
+        if len(lengths) == len(dataset):
+            return lengths
+    if hasattr(dataset, "videos"):
+        lengths = []
+        for video in dataset.videos:
+            if isinstance(video, dict):
+                frames = video.get("frames_names") or video.get("frames") or video.get("frame_paths")
+                lengths.append(len(frames) if frames is not None else 1)
+                continue
+            if isinstance(video, (list, tuple)) and len(video) > 0:
+                frames = video[0]
+                if hasattr(dataset, "isinfered"):
+                    lengths.append(sum(1 for i in range(len(frames)) if dataset.isinfered(i)))
+                else:
+                    lengths.append(len(frames))
+                continue
+            lengths.append(1)
+        if len(lengths) == len(dataset):
+            return lengths
+    return [1 for _ in range(len(dataset))]
+
+
+class SequenceDistributedSampler(DistributedSampler):
+    def __init__(self, dataset, num_replicas=None, rank=None, shuffle=False, seed=0, drop_last=False, lengths=None):
+        super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle, seed=seed, drop_last=drop_last)
+        self.lengths = lengths if lengths is not None else _infer_sequence_lengths(dataset)
+
+    def _build_rank_indices(self):
+        indices = list(range(len(self.dataset)))
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            indices = torch.randperm(len(indices), generator=g).tolist()
+
+        items = [(idx, self.lengths[idx] if idx < len(self.lengths) else 1) for idx in indices]
+        items.sort(key=lambda x: (-x[1], x[0]))
+
+        loads = [0 for _ in range(self.num_replicas)]
+        buckets = [[] for _ in range(self.num_replicas)]
+        for idx, length in items:
+            target = min(range(self.num_replicas), key=lambda r: (loads[r], r))
+            buckets[target].append(idx)
+            loads[target] += length
+        return buckets[self.rank]
+
+    def __iter__(self):
+        return iter(self._build_rank_indices())
+
+    def __len__(self):
+        return len(self._build_rank_indices())
