@@ -71,6 +71,38 @@ def _dataset_defaults(name):
     }
 
 
+def _resolve_image_config_path(image_save_dir, img_checkpoint_folder, img_checkpoint_name, config_dir):
+    ckpt_name = img_checkpoint_name.split("@")[-1]
+    primary = os.path.join(
+        image_save_dir,
+        img_checkpoint_folder + img_checkpoint_name,
+        f"{ckpt_name}_config.yaml",
+    )
+    if os.path.isfile(primary):
+        return primary
+
+    # Try to locate under the source-domain root (e.g., .../apollo/image/<ckpt>/...)
+    parent = os.path.dirname(config_dir)
+    source_root = os.path.dirname(parent) if os.path.basename(parent) in ("video", "image") else None
+    if source_root:
+        candidate = os.path.join(source_root, "image", img_checkpoint_name, f"{ckpt_name}_config.yaml")
+        if os.path.isfile(candidate):
+            return candidate
+        # Fallback: any image config under source_root/image/*
+        image_root = os.path.join(source_root, "image")
+        if os.path.isdir(image_root):
+            configs = []
+            for entry in os.listdir(image_root):
+                cfg_path = os.path.join(image_root, entry, f"{entry}_config.yaml")
+                if os.path.isfile(cfg_path):
+                    configs.append(cfg_path)
+            if configs:
+                configs.sort()
+                return configs[-1]
+
+    return None
+
+
 def _to_gray_small(frame_chw, h_small, w_small):
     img = inverse_normalize(frame_chw)
     img_gray = Image.fromarray(img).convert("L")
@@ -278,8 +310,33 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
     img_checkpoint_folder = image_model_cfg["checkpoint_folder"]
     img_checkpoint_name = image_model_cfg["checkpoint_name"]
     img_best_model = image_model_cfg["best_model"]
-    with open(os.path.join(image_save_dir, img_checkpoint_folder + img_checkpoint_name, img_checkpoint_name.split("@")[-1] + "_config.yaml"), 'r') as cfg_file:
+    image_cfg_path = _resolve_image_config_path(
+        image_save_dir,
+        img_checkpoint_folder,
+        img_checkpoint_name,
+        config_dir,
+    )
+    if not image_cfg_path:
+        raise FileNotFoundError(
+            "Image model config not found for '{}'. Checked '{}' and source-domain image roots.".format(
+                img_checkpoint_name,
+                os.path.join(
+                    image_save_dir,
+                    img_checkpoint_folder + img_checkpoint_name,
+                    img_checkpoint_name.split("@")[-1] + "_config.yaml",
+                ),
+            )
+        )
+    with open(image_cfg_path, 'r') as cfg_file:
         image_cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
+    resolved_dir = os.path.dirname(image_cfg_path)
+    resolved_name = os.path.basename(resolved_dir)
+    if resolved_name != img_checkpoint_name:
+        rel_parent = os.path.relpath(os.path.dirname(resolved_dir), image_cfg.get("save_dir", image_save_dir))
+        img_checkpoint_folder = "" if rel_parent == "." else rel_parent + "/"
+        img_checkpoint_name = resolved_name
+        if is_main_process():
+            print(f"Using image model config fallback: {image_cfg_path}")
     seg_model = get_image_model(image_cfg["model_cfg"], DATASET.n_classes)
     seg_model.to(device)
     if img_best_model:

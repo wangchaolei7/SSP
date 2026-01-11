@@ -7,9 +7,10 @@ cd "${REPO_ROOT}"
 
 # Edit parameters here.
 NPROC=6
-CHECKPOINT_NAME="26-12_00-23"
-SAVE_DIR="/data1/wangcl/project/SSP/apollo"
+CHECKPOINT_NAME="29-12_12-52"
+SAVE_DIR="/data1/wangcl/project/SSP/kitti360"
 CHECKPOINT_FOLDER="video/"
+CHECKPOINT_PATH="/data1/wangcl/project/SSP/kitti360/video/29-12_12-52/epoch_0010.pth.tar"
 SPLIT="val"
 # Set to 1 for metrics only (no visualization output).
 METRICS_ONLY=1
@@ -28,6 +29,9 @@ run_eval() {
   if [[ "${METRICS_ONLY}" == "1" ]]; then
     common_args+=(--metrics-only)
   fi
+  if [[ -n "${CHECKPOINT_PATH}" ]]; then
+    common_args+=(--checkpoint-path "${CHECKPOINT_PATH}")
+  fi
   if [[ -n "${EXTRA_ARGS}" ]]; then
     # shellcheck disable=SC2206
     common_args+=(${EXTRA_ARGS})
@@ -41,17 +45,19 @@ run_eval() {
     "$@"
 }
 
-run_eval "apollo" --dataset apolloscape
-run_eval "camvid" --dataset camvid
-run_eval "kitti360" --dataset kitti360
+# run_eval "apollo" --dataset apolloscape
+# run_eval "camvid" --dataset camvid
+# run_eval "kitti360" --dataset kitti360
+
 run_eval "cityscapes_origin" \
   --corruption origin_leftImg8bit_sequence \
   --city-root-images "${CITY_ROOT_ORIGIN}" \
   --city-root-labels "${CITY_ROOT_LABELS}"
 
-for corruption in fog frost snow spatter; do
-  run_eval "cityscapes_${corruption}" \
-    --corruption "${corruption}" \
-    --city-root-images "${CITY_ROOT_CORR}" \
-    --city-root-labels "${CITY_ROOT_LABELS}"
-done
+# for corruption in fog frost snow spatter; do
+#   run_eval "cityscapes_${corruption}" \
+#     --dataset cityscapes_seq_corrupt \
+#     --corruption "${corruption}" \
+#     --city-root-images "${CITY_ROOT_CORR}" \
+#     --city-root-labels "${CITY_ROOT_LABELS}"
+# done
