@@ -4,6 +4,7 @@ with warnings.catch_warnings():
     import os
     import PIL.Image as Image
     import numpy as np
+    import time
     from tqdm import tqdm
     import torch
     import torch.nn as nn
@@ -222,7 +223,20 @@ def _class_names(dataset, n_classes):
         return [classes.get(i, f"class_{i}") for i in range(n_classes)]
     return [f"class_{i}" for i in range(n_classes)]
 
-def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res, output_subdir=None, data_cfg_override=None, checkpoint_path=None):
+def main(
+    config,
+    checkpoint_name,
+    checkpoint_folder,
+    split,
+    evaluation,
+    best_model,
+    write_res,
+    output_subdir=None,
+    data_cfg_override=None,
+    checkpoint_path=None,
+    max_frames=None,
+    report_fps=False,
+):
     distributed = setup_distributed()
     distributed = distributed or is_distributed()
     rank = get_rank()
@@ -365,15 +379,41 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
         mvc_cnt = {n: 0 for n in MVC_WINDOWS}
         is_cityscapes = data_cfg["dataset"].lower() == "cityscapes_seq_corrupt"
 
+    max_frames = max_frames if (max_frames is None or max_frames > 0) else None
+    frames_remaining = max_frames
+    infer_time = 0.0
+    infer_frames = 0
+    if report_fps and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+
     # Predictions + evaluation
     video_iter = tqdm(video_loader, disable=not is_main_process())
     for (frames_names, frames, labels_names, labels, v_name, homos) in video_iter:
+        if frames_remaining is not None and frames_remaining <= 0:
+            break
+        if frames_remaining is not None:
+            keep = min(frames_remaining, len(frames))
+            if keep <= 0:
+                break
+            frames = frames[:keep]
+            frames_names = frames_names[:keep]
+            homos = homos[:keep]
+            frames_remaining -= keep
         frame_list = []
         label_list = []
         pred_list = []
 
         # Predictions
+        if report_fps:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            infer_start = time.perf_counter()
         preds = model.infer_video(frames, homos, device)
+        if report_fps:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            infer_time += time.perf_counter() - infer_start
+            infer_frames += len(preds)
         frame_list = [f.numpy() if torch.is_tensor(f) else np.asarray(f) for f in frames]
         label_list = [l.numpy() if torch.is_tensor(l) else np.asarray(l) for l in labels]
         pred_list = [
@@ -560,6 +600,48 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
                     f.write(f"  {name}: {value:.5f}\n")
                 f.write("\n")
 
+    if report_fps:
+        if distributed:
+            fps_stats = torch.tensor([infer_time, float(infer_frames)], device=device, dtype=torch.float64)
+            fps_stats = all_reduce_tensor(fps_stats)
+            infer_time = float(fps_stats[0].item())
+            infer_frames = int(round(fps_stats[1].item()))
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+            max_alloc_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            max_reserved_mb = torch.cuda.max_memory_reserved(device) / (1024 ** 2)
+        else:
+            max_alloc_mb = float("nan")
+            max_reserved_mb = float("nan")
+        fps = infer_frames / infer_time if infer_time > 0 else float("nan")
+        if is_main_process():
+            crop_size = data_cfg.get("crop_size")
+            crop_desc = f"{crop_size[0]}x{crop_size[1]}" if crop_size else "unknown"
+            max_frames_desc = str(max_frames) if max_frames is not None else "all"
+            print(
+                "FPS (forward only) = {:.2f} | frames = {} | time = {:.3f}s | "
+                "input = {} | max_frames = {} | peak_alloc = {:.1f} MiB | peak_reserved = {:.1f} MiB".format(
+                    fps,
+                    infer_frames,
+                    infer_time,
+                    crop_desc,
+                    max_frames_desc,
+                    max_alloc_mb,
+                    max_reserved_mb,
+                )
+            )
+            fps_log_name = f"log_fps_{split}.txt"
+            with open(os.path.join(vis_dir, fps_log_name), "a") as f:
+                f.write(f"Checkpoint: {checkpoint_loaded_path or checkpoint_name}\n")
+                f.write(f"FPS_forward_only = {fps:.4f}\n")
+                f.write(f"frames = {infer_frames}\n")
+                f.write(f"time_sec = {infer_time:.6f}\n")
+                f.write(f"input = {crop_desc}\n")
+                f.write(f"max_frames = {max_frames_desc}\n")
+                f.write(f"peak_alloc_mib = {max_alloc_mb:.2f}\n")
+                f.write(f"peak_reserved_mib = {max_reserved_mb:.2f}\n")
+                f.write("\n")
+
     if distributed:
         barrier()
         if is_main_process():
@@ -593,6 +675,12 @@ def parse_args():
                         help="Root folder for Cityscapes gtFine labels")
     parser.add_argument("--output-subdir", required=False, type=str, default=None,
                         help="Optional subdir under checkpoint output directory")
+    parser.add_argument("--input-size", nargs=2, type=int, metavar=("H", "W"), default=None,
+                        help="Override input resolution as height width, e.g. 1024 2048")
+    parser.add_argument("--max-frames", required=False, type=int, default=None,
+                        help="Limit total number of frames for inference (across videos)")
+    parser.add_argument("--report-fps", dest="report_fps", action="store_true",
+                        help="Report forward-only FPS and peak GPU memory usage")
     parser.add_argument('--evaluation', dest='evaluation', action='store_true', help='Compute metrics (default)')
     parser.add_argument('--no-evaluation', dest='evaluation', action='store_false', help='Don\'t compute metrics')
     parser.add_argument('--best-model', dest='best_model', action='store_true', help='Use best checkpoint')
@@ -635,6 +723,9 @@ if __name__=='__main__':
             override["root_images"] = args.city_root_images
         if args.city_root_labels:
             override["root_labels"] = args.city_root_labels
+        if args.input_size:
+            override["crop_size"] = [args.input_size[0], args.input_size[1]]
+            override["square_crop"] = False
         return override or None
 
     corruptions = []
@@ -663,6 +754,8 @@ if __name__=='__main__':
                 output_subdir=output_subdir,
                 data_cfg_override=_build_data_cfg_override(corruption),
                 checkpoint_path=args.checkpoint_path,
+                max_frames=args.max_frames,
+                report_fps=args.report_fps,
             )
     else:
         main(
@@ -676,5 +769,7 @@ if __name__=='__main__':
             output_subdir=args.output_subdir,
             data_cfg_override=_build_data_cfg_override(None),
             checkpoint_path=args.checkpoint_path,
+            max_frames=args.max_frames,
+            report_fps=args.report_fps,
         )
     cleanup_distributed()
