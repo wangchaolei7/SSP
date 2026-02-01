@@ -9,6 +9,7 @@ with warnings.catch_warnings():
     import torch.nn as nn
     from torch.utils.data import DataLoader
     import yaml
+    import time
 
     from vis_utils.visualization import color_predictions, inverse_normalize, pred_to_mask
     from models.image.models import get_model as get_image_model
@@ -222,7 +223,19 @@ def _class_names(dataset, n_classes):
         return [classes.get(i, f"class_{i}") for i in range(n_classes)]
     return [f"class_{i}" for i in range(n_classes)]
 
-def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res, output_subdir=None, data_cfg_override=None, checkpoint_path=None):
+
+def _wait_for_file(path, poll_seconds=30):
+    while not os.path.exists(path):
+        time.sleep(poll_seconds)
+
+
+def _touch_file(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("done\n")
+
+
+def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_model, write_res, write_gif, output_subdir=None, data_cfg_override=None, checkpoint_path=None):
     distributed = setup_distributed()
     distributed = distributed or is_distributed()
     rank = get_rank()
@@ -272,6 +285,29 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
     vis_dir = config_dir
     if output_subdir:
         vis_dir = os.path.join(vis_dir, output_subdir)
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # Dataset
+    video_dataset, DATASET = prep_infer_image_dataset(data_cfg, split=split)
+
+    single_rank_eval = distributed and len(video_dataset) < world_size
+    sync_file = None
+    if single_rank_eval:
+        run_id = os.environ.get("TORCHELASTIC_RUN_ID") or os.environ.get("MASTER_PORT") or str(os.getppid())
+        sync_file = os.path.join(vis_dir, f".single_rank_eval_done_{run_id}_{split}")
+        if is_main_process():
+            print(
+                f"[eval] Dataset has {len(video_dataset)} videos < world_size={world_size}. "
+                "Running single-rank eval to avoid NCCL timeouts."
+            )
+        if not is_main_process():
+            _wait_for_file(sync_file)
+            cleanup_distributed()
+            return
+        distributed = False
+        world_size = 1
+        rank = 0
+
     output_root = vis_dir if not distributed else os.path.join(vis_dir, f"rank_{rank}")
     save_folder = os.path.join(output_root, split)
     save_folder_colored = os.path.join(output_root, split + "_colored")
@@ -290,11 +326,9 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
             os.makedirs(save_folder_labels)
         if not os.path.exists(save_folder_labels_blended):
             os.makedirs(save_folder_labels_blended)
-        if not os.path.exists(save_folder_gif):
+        if write_gif and not os.path.exists(save_folder_gif):
             os.makedirs(save_folder_gif)
 
-    # Dataset 
-    video_dataset, DATASET = prep_infer_image_dataset(data_cfg, split=split)
     sampler = SequenceDistributedSampler(video_dataset, shuffle=False) if distributed else None
     video_loader = DataLoader(
         video_dataset,
@@ -373,7 +407,10 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
         pred_list = []
 
         # Predictions
-        preds = model.infer_video(frames, homos, device)
+        infer_frames = frames
+        if is_main_process():
+            infer_frames = tqdm(frames, total=len(frames), leave=False, desc=f"{v_name} infer")
+        preds = model.infer_video(infer_frames, homos, device)
         frame_list = [f.numpy() if torch.is_tensor(f) else np.asarray(f) for f in frames]
         label_list = [l.numpy() if torch.is_tensor(l) else np.asarray(l) for l in labels]
         pred_list = [
@@ -453,7 +490,7 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
                     #    label_pil_blended.save(os.path.join(save_folder_labels_blended, v_name, label_name))
 
         # Save gifs
-        if write_res:
+        if write_res and write_gif:
             if not os.path.exists(os.path.join(save_folder_gif, v_name)):
                 os.makedirs(os.path.join(save_folder_gif, v_name))
             frame_gif_list = [Image.fromarray(inverse_normalize(frame)) for frame in frame_list]
@@ -567,6 +604,9 @@ def main(config, checkpoint_name, checkpoint_folder, split, evaluation, best_mod
             merge_rank_outputs(vis_dir, rank_dirs, cleanup=True)
         barrier()
 
+    if single_rank_eval and is_main_process() and sync_file:
+        _touch_file(sync_file)
+
 
 import argparse
 def parse_args():
@@ -591,6 +631,10 @@ def parse_args():
                         help="Root folder for Cityscapes corrupted images")
     parser.add_argument("--city-root-labels", required=False, type=str, default=None,
                         help="Root folder for Cityscapes gtFine labels")
+    parser.add_argument("--city-seq", required=False, type=str, default=None,
+                        help="Single Cityscapes sequence (e.g. munster/seq173 or absolute path)")
+    parser.add_argument("--city-seqs", required=False, type=str, default=None,
+                        help="Comma-separated Cityscapes sequences")
     parser.add_argument("--output-subdir", required=False, type=str, default=None,
                         help="Optional subdir under checkpoint output directory")
     parser.add_argument('--evaluation', dest='evaluation', action='store_true', help='Compute metrics (default)')
@@ -599,11 +643,14 @@ def parse_args():
     parser.add_argument('--no-best-model', dest='best_model', action='store_false', help='Use last checkpoint (default)')
     parser.add_argument('--write-res', dest='write_res', action='store_true', help='Write results to disk (default)')
     parser.add_argument('--no-write-res', dest='write_res', action='store_false', help='Do not write results to disk')
+    parser.add_argument('--write-gif', dest='write_gif', action='store_true', help='Write GIFs (default)')
+    parser.add_argument('--no-gif', dest='write_gif', action='store_false', help='Do not write GIFs')
     parser.add_argument('--metrics-only', dest='metrics_only', action='store_true',
                         help='Compute metrics only (implies --no-write-res)')
     parser.set_defaults(best_model=False)
     parser.set_defaults(evaluation=True)
     parser.set_defaults(write_res=True)
+    parser.set_defaults(write_gif=True)
     parser.set_defaults(metrics_only=False)
     return parser.parse_args()
 
@@ -619,6 +666,7 @@ if __name__=='__main__':
     evaluation = args.evaluation
     best_model = args.best_model
     write_res = args.write_res
+    write_gif = args.write_gif
     if args.metrics_only:
         evaluation = True
         write_res = False
@@ -635,6 +683,13 @@ if __name__=='__main__':
             override["root_images"] = args.city_root_images
         if args.city_root_labels:
             override["root_labels"] = args.city_root_labels
+        if args.city_seq or args.city_seqs:
+            seqs = []
+            if args.city_seq:
+                seqs.append(args.city_seq)
+            if args.city_seqs:
+                seqs.append(args.city_seqs)
+            override["sequence_filter"] = seqs
         return override or None
 
     corruptions = []
@@ -658,12 +713,13 @@ if __name__=='__main__':
                 checkpoint_folder,
                 split,
                 evaluation,
-                best_model,
-                write_res,
-                output_subdir=output_subdir,
-                data_cfg_override=_build_data_cfg_override(corruption),
-                checkpoint_path=args.checkpoint_path,
-            )
+            best_model,
+            write_res,
+            write_gif,
+            output_subdir=output_subdir,
+            data_cfg_override=_build_data_cfg_override(corruption),
+            checkpoint_path=args.checkpoint_path,
+        )
     else:
         main(
             config,
@@ -673,6 +729,7 @@ if __name__=='__main__':
             evaluation,
             best_model,
             write_res,
+            write_gif,
             output_subdir=args.output_subdir,
             data_cfg_override=_build_data_cfg_override(None),
             checkpoint_path=args.checkpoint_path,

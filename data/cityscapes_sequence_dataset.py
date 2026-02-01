@@ -65,6 +65,39 @@ _LABEL_SUFFIXES = (
 )
 
 
+def _normalize_sequence_entry(entry: str) -> str:
+    entry = (entry or "").strip().replace("\\", "/")
+    if not entry:
+        return ""
+    parts = [p for p in entry.split("/") if p]
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return "/".join(parts)
+
+
+def _parse_sequence_filter(value):
+    if value is None:
+        return None
+    items = []
+    if isinstance(value, str):
+        items = [v.strip() for v in value.split(",") if v.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                items.extend([v.strip() for v in item.split(",") if v.strip()])
+            else:
+                items.append(str(item))
+    else:
+        items = [str(value)]
+    normalized = [_normalize_sequence_entry(item) for item in items]
+    normalized = [item for item in normalized if item]
+    if not normalized:
+        return None
+    return set(normalized)
+
+
 def _base_id_from_image(name: str) -> str:
     stem = os.path.splitext(name)[0]
     if stem.endswith(_IMAGE_SUFFIX):
@@ -115,6 +148,9 @@ class CityscapesSequenceCorruptionsDataset(Dataset):
 
         self.img_transforms = img_transforms
         self.segmentation_transforms = segmentation_transforms
+        self.sequence_filter = _parse_sequence_filter(
+            data_cfg.get("sequence_filter", data_cfg.get("sequence_filters"))
+        )
 
         self.videos = []
         self.total_images = 0
@@ -135,6 +171,9 @@ class CityscapesSequenceCorruptionsDataset(Dataset):
             for seq in sorted(os.listdir(city_dir)):
                 img_dir = os.path.join(city_dir, seq)
                 if not os.path.isdir(img_dir):
+                    continue
+                seq_key = f"{city}/{seq}"
+                if self.sequence_filter and seq_key not in self.sequence_filter:
                     continue
 
                 label_dir = os.path.join(self.root_labels, city, seq)

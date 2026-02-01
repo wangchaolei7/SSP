@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from utils.distributed import is_main_process
 from data.image.image_dataset import ImageDataset, ImageInferenceDataset, ImageLogitsDataset
@@ -297,6 +298,30 @@ def prep_infer_image_dataset(data_cfg, split="val", val_skip_frames=1):
             data_cfg["dataset"], path=data_cfg["path"], split=split
         )
         video_indices = video_train_idx if split == "train" else video_val_idx
+        sequence_filter = data_cfg.get("sequence_filter", data_cfg.get("sequence_filters"))
+        if sequence_filter:
+            if isinstance(sequence_filter, str):
+                raw_items = [v.strip() for v in sequence_filter.split(",") if v.strip()]
+            elif isinstance(sequence_filter, (list, tuple, set)):
+                raw_items = []
+                for item in sequence_filter:
+                    if item is None:
+                        continue
+                    if isinstance(item, str):
+                        raw_items.extend([v.strip() for v in item.split(",") if v.strip()])
+                    else:
+                        raw_items.append(str(item))
+            else:
+                raw_items = [str(sequence_filter)]
+            normalized = set()
+            for item in raw_items:
+                item = item.replace("\\", "/").strip()
+                if not item:
+                    continue
+                normalized.add(item)
+                normalized.add(os.path.basename(item))
+            if normalized:
+                video_indices = [v for v in video_indices if v in normalized]
         _validate_num_classes(data_cfg, DATASET)
         _, _, frame_transforms, mask_transforms = get_transforms(
             "image", data_cfg["crop_size"], DATASET, data_augmentation=False
