@@ -29,6 +29,12 @@ from data.cityscapes_sequence_dataset import (
     CityscapesSequenceCorruptionsDataset,
     CITYSCAPES_SEQ_CORRUPT,
 )
+from data.folder_sequence_dataset import (
+    FolderSequenceImageInferenceDataset,
+    build_folder_sequence_dataset_def,
+    folder_sequence_defaults,
+    is_folder_sequence_dataset,
+)
 
 
 def _validate_num_classes(data_cfg, DATASET):
@@ -288,6 +294,28 @@ def prep_infer_image_dataset(data_cfg, split="val", val_skip_frames=1):
             DATASET,
             data_cfg,
             split=split,
+            img_transforms=frame_transforms,
+            segmentation_transforms=mask_transforms,
+            val_skip_frames=val_skip_frames,
+            log_stats=is_main_process(),
+        )
+    elif is_folder_sequence_dataset(dataset_name):
+        merged_data_cfg = dict(folder_sequence_defaults(dataset_name))
+        merged_data_cfg.update(data_cfg)
+        root_images = merged_data_cfg.get("root_images")
+        root_labels = merged_data_cfg.get("root_labels")
+        if not root_images or not root_labels:
+            raise ValueError(
+                f"{dataset_name} requires data_cfg.root_images and data_cfg.root_labels"
+            )
+        DATASET = build_folder_sequence_dataset_def(merged_data_cfg)
+        _validate_num_classes(merged_data_cfg, DATASET)
+        _, _, frame_transforms, mask_transforms = get_transforms(
+            "image", merged_data_cfg["crop_size"], DATASET, data_augmentation=False
+        )
+        video_dataset = FolderSequenceImageInferenceDataset(
+            DATASET,
+            merged_data_cfg,
             img_transforms=frame_transforms,
             segmentation_transforms=mask_transforms,
             val_skip_frames=val_skip_frames,

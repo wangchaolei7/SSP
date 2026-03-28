@@ -6,16 +6,19 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 # Edit parameters here.
-NPROC=6
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+NPROC=${NPROC:-1}
 CHECKPOINT_NAME="29-12_12-52"
 SAVE_DIR="/data1/wangcl/project/SSP/kitti360"
 CHECKPOINT_FOLDER="video/"
 CHECKPOINT_PATH="/data1/wangcl/project/SSP/kitti360/video/29-12_12-52/epoch_0010.pth.tar"
 SPLIT="val"
 # Set to 1 for metrics only (no visualization output).
-METRICS_ONLY=1
+METRICS_ONLY=0
 # Extra args passed to eval.vis.video (leave empty if unused).
-EXTRA_ARGS=""
+MAX_FRAMES=100
+EXTRA_ARGS="--report-fps --max-frames ${MAX_FRAMES}"
+OUTPUT_BASE="FPS_cityscapes_origin"
 
 CITY_ROOT_ORIGIN="${CITY_ROOT_ORIGIN:-/home/wangcl/data/open_video_DGSS/cityscapes_sequence}"
 CITY_ROOT_CORR="${CITY_ROOT_CORR:-/home/wangcl/data/open_video_DGSS/cityscapes_sequence/leftImg8bit_sequence_Corruptions}"
@@ -49,15 +52,14 @@ run_eval() {
 # run_eval "camvid" --dataset camvid
 # run_eval "kitti360" --dataset kitti360
 
-run_eval "cityscapes_origin" \
+run_eval "${OUTPUT_BASE}/size_1024x2048" \
   --corruption origin_leftImg8bit_sequence \
   --city-root-images "${CITY_ROOT_ORIGIN}" \
-  --city-root-labels "${CITY_ROOT_LABELS}"
+  --city-root-labels "${CITY_ROOT_LABELS}" \
+  --input-size 1024 2048
 
-# for corruption in fog frost snow spatter; do
-#   run_eval "cityscapes_${corruption}" \
-#     --dataset cityscapes_seq_corrupt \
-#     --corruption "${corruption}" \
-#     --city-root-images "${CITY_ROOT_CORR}" \
-#     --city-root-labels "${CITY_ROOT_LABELS}"
-# done
+run_eval "${OUTPUT_BASE}/size_512x1024" \
+  --corruption origin_leftImg8bit_sequence \
+  --city-root-images "${CITY_ROOT_ORIGIN}" \
+  --city-root-labels "${CITY_ROOT_LABELS}" \
+  --input-size 512 1024
